@@ -1,0 +1,143 @@
+import { Connection, PublicKey } from '@solana/web3.js';
+import { getConfig, lamportsToSol } from '../config';
+import { isEventProcessed } from '../db/repo';
+import { handleParsedSwap, type ParsedSwap } from '../webhook/handler';
+import { logger } from '../utils/logger';
+
+const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+
+export function startWsMonitor(connection: Connection): void {
+  const config = getConfig();
+  const sourceWallet = config.SOURCE_WALLET;
+  const walletPubkey = new PublicKey(sourceWallet);
+
+  let subId: number;
+  let lastEventAt = Date.now();
+
+  function subscribe() {
+    subId = connection.onLogs(
+      walletPubkey,
+      async (logs) => {
+        lastEventAt = Date.now();
+        if (logs.err) return;
+
+        const sig = logs.signature;
+        if (isEventProcessed(sig)) return;
+
+        try {
+          const parsed = await parseSwapFromRpc(connection, sig, sourceWallet);
+          if (parsed) {
+            logger.info(
+              { source: 'ws', direction: parsed.direction, token: parsed.tokenMint, sol: parsed.solAmount, sig },
+              'WS: swap detected',
+            );
+            await handleParsedSwap(parsed);
+          }
+        } catch (err) {
+          logger.error({ err, sig }, 'WS: error processing transaction');
+        }
+      },
+      'confirmed',
+    );
+
+    logger.info({ subscriptionId: subId, sourceWallet }, 'WebSocket monitor active');
+  }
+
+  subscribe();
+
+  // Resubscribe if the WebSocket goes silent for too long (5 min)
+  setInterval(() => {
+    const silentMs = Date.now() - lastEventAt;
+    if (silentMs > 5 * 60 * 1000) {
+      logger.warn({ silentMs }, 'WS: no events in 5 min, resubscribing');
+      try { connection.removeOnLogsListener(subId); } catch { /* ignore */ }
+      subscribe();
+    }
+  }, 60_000);
+}
+
+async function parseSwapFromRpc(
+  connection: Connection,
+  signature: string,
+  sourceWallet: string,
+): Promise<ParsedSwap | null> {
+  const tx = await connection.getParsedTransaction(signature, {
+    maxSupportedTransactionVersion: 0,
+    commitment: 'confirmed',
+  });
+
+  if (!tx?.meta) return null;
+
+  const accountKeys = tx.transaction.message.accountKeys.map((k) =>
+    k.pubkey.toBase58(),
+  );
+  const walletIdx = accountKeys.indexOf(sourceWallet);
+  if (walletIdx === -1) return null;
+
+  // Net SOL change for the source wallet (lamports, includes fees)
+  const netSolLamports = tx.meta.postBalances[walletIdx] - tx.meta.preBalances[walletIdx];
+  if (netSolLamports === 0) return null;
+
+  // Token balance changes owned by source wallet (exclude wrapped SOL)
+  const pre = tx.meta.preTokenBalances ?? [];
+  const post = tx.meta.postTokenBalances ?? [];
+
+  const tokenMap = new Map<string, { pre: bigint; post: bigint; decimals: number }>();
+
+  for (const tb of pre) {
+    if (tb.owner !== sourceWallet || tb.mint === WSOL_MINT) continue;
+    tokenMap.set(tb.mint, {
+      pre: BigInt(tb.uiTokenAmount.amount),
+      post: 0n,
+      decimals: tb.uiTokenAmount.decimals,
+    });
+  }
+
+  for (const tb of post) {
+    if (tb.owner !== sourceWallet || tb.mint === WSOL_MINT) continue;
+    const existing = tokenMap.get(tb.mint);
+    if (existing) {
+      existing.post = BigInt(tb.uiTokenAmount.amount);
+    } else {
+      tokenMap.set(tb.mint, {
+        pre: 0n,
+        post: BigInt(tb.uiTokenAmount.amount),
+        decimals: tb.uiTokenAmount.decimals,
+      });
+    }
+  }
+
+  // Find token with largest absolute change
+  let bestMint: string | null = null;
+  let bestAbsDelta = 0n;
+  let bestDecimals = 6;
+  let bestDelta = 0n;
+
+  for (const [mint, { pre: p, post: q, decimals }] of tokenMap) {
+    const delta = q - p;
+    const abs = delta < 0n ? -delta : delta;
+    if (abs > bestAbsDelta) {
+      bestAbsDelta = abs;
+      bestMint = mint;
+      bestDecimals = decimals;
+      bestDelta = delta;
+    }
+  }
+
+  if (!bestMint || bestAbsDelta === 0n) return null;
+
+  const direction: 'BUY' | 'SELL' = netSolLamports > 0 ? 'SELL' : 'BUY';
+
+  // Cross-validate: BUY should gain tokens, SELL should lose tokens
+  if (direction === 'BUY' && bestDelta <= 0n) return null;
+  if (direction === 'SELL' && bestDelta >= 0n) return null;
+
+  return {
+    signature,
+    direction,
+    tokenMint: bestMint,
+    solAmount: lamportsToSol(Math.abs(netSolLamports)),
+    tokenAmount: bestAbsDelta,
+    tokenDecimals: bestDecimals,
+  };
+}

@@ -143,10 +143,20 @@ async function processTx(tx: HeliusEnhancedTx, sourceWallet: string): Promise<vo
 
   logger.info(
     { direction: parsed.direction, token: parsed.tokenMint, sol: parsed.solAmount, sig: parsed.signature },
-    'Source wallet swap detected',
+    'Source wallet swap detected (webhook)',
   );
 
-  markEventProcessed(tx.signature);
+  await handleParsedSwap(parsed);
+}
+
+/**
+ * Shared post-parsing pipeline: record → risk → execute.
+ * Called by both the webhook handler and the WebSocket monitor.
+ */
+export async function handleParsedSwap(parsed: ParsedSwap): Promise<void> {
+  if (isEventProcessed(parsed.signature)) return;
+
+  markEventProcessed(parsed.signature);
 
   recordSourceTrade(
     parsed.signature,
@@ -156,7 +166,6 @@ async function processTx(tx: HeliusEnhancedTx, sourceWallet: string): Promise<vo
     parsed.tokenAmount.toString(),
   );
 
-  // Risk evaluation (includes Jupiter quote)
   const riskResult = await evaluateRisk(parsed);
 
   if (riskResult.action === 'REJECT') {
@@ -166,7 +175,6 @@ async function processTx(tx: HeliusEnhancedTx, sourceWallet: string): Promise<vo
     return;
   }
 
-  // Execute swap using the pre-validated quote from risk engine
   const plan = riskResult.tradePlan!;
   const result = await executeSwap(plan);
 

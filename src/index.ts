@@ -2,8 +2,9 @@ import express from 'express';
 import path from 'path';
 import { loadConfig, getConfig } from './config';
 import { initDb, closeDb } from './db/sqlite';
-import { getKeypair } from './trade/solana';
+import { getKeypair, getSharedConnection } from './trade/solana';
 import { webhookRouter } from './webhook/handler';
+import { startWsMonitor } from './monitor/wsMonitor';
 import { notifyStartup, notifyError } from './notify/telegram';
 import {
   getVirtualPnL, getVirtualPortfolio, getDailySpent, getOpenPositionCount,
@@ -159,6 +160,14 @@ async function main(): Promise<void> {
       'Copy-trading bot started',
     );
     notifyStartup(keypair.publicKey.toBase58(), config.DRY_RUN);
+
+    // Start WebSocket monitor for near-instant detection (~1-2s vs ~8s webhook)
+    try {
+      const connection = getSharedConnection();
+      startWsMonitor(connection);
+    } catch (err) {
+      logger.error({ err }, 'Failed to start WebSocket monitor, relying on webhook only');
+    }
   });
 
   const shutdown = (signal: string) => {
