@@ -43,6 +43,19 @@ const MIGRATIONS: string[] = [
     total_received REAL NOT NULL DEFAULT 0,
     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
   );`,
+
+  `CREATE TABLE IF NOT EXISTS source_trades (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    signature      TEXT NOT NULL,
+    direction      TEXT NOT NULL,
+    mint           TEXT NOT NULL,
+    sol_amount     REAL NOT NULL,
+    token_amount   TEXT NOT NULL DEFAULT '0',
+    bot_action     TEXT NOT NULL DEFAULT 'DETECTED',
+    bot_sol_amount REAL NOT NULL DEFAULT 0,
+    reject_reason  TEXT,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+  );`,
 ];
 
 export function runMigrations(db: Database.Database): void {

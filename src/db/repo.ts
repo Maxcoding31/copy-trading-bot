@@ -170,3 +170,69 @@ export function getVirtualPnL(): { totalSpent: number; totalReceived: number; pn
     pnl: row.received - row.spent,
   };
 }
+
+// ── Source Trade Tracking ──────────────────────────
+
+export interface SourceTradeRow {
+  id: number;
+  signature: string;
+  direction: string;
+  mint: string;
+  sol_amount: number;
+  token_amount: string;
+  bot_action: string;
+  bot_sol_amount: number;
+  reject_reason: string | null;
+  created_at: string;
+}
+
+export function recordSourceTrade(
+  signature: string,
+  direction: string,
+  mint: string,
+  solAmount: number,
+  tokenAmount: string,
+): number {
+  const result = getDb()
+    .prepare(
+      `INSERT INTO source_trades (signature, direction, mint, sol_amount, token_amount)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(signature, direction, mint, solAmount, tokenAmount);
+  return result.lastInsertRowid as number;
+}
+
+export function updateSourceTradeAction(
+  signature: string,
+  botAction: string,
+  botSolAmount: number,
+  rejectReason?: string,
+): void {
+  getDb()
+    .prepare(
+      `UPDATE source_trades SET bot_action = ?, bot_sol_amount = ?, reject_reason = ?
+       WHERE signature = ?`,
+    )
+    .run(botAction, botSolAmount, rejectReason ?? null, signature);
+}
+
+export function getRecentSourceTrades(limit = 50): SourceTradeRow[] {
+  return getDb()
+    .prepare('SELECT * FROM source_trades ORDER BY id DESC LIMIT ?')
+    .all(limit) as SourceTradeRow[];
+}
+
+export function getRecentVirtualTrades(limit = 50) {
+  return getDb()
+    .prepare('SELECT * FROM virtual_trades ORDER BY id DESC LIMIT ?')
+    .all(limit) as Array<{
+      id: number;
+      signature: string;
+      direction: string;
+      mint: string;
+      sol_amount: number;
+      token_amount: string;
+      token_price: number;
+      created_at: string;
+    }>;
+}

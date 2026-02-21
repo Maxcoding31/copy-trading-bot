@@ -40,6 +40,9 @@ const configSchema = z.object({
   BLOCK_IF_MINT_AUTHORITY: boolStr,
   BLOCK_IF_FREEZE_AUTHORITY: boolStr,
 
+  // Virtual simulation
+  VIRTUAL_STARTING_BALANCE: z.coerce.number().gt(0).default(5),
+
   // Kill switches
   PAUSE_TRADING: boolStr,
   DRY_RUN: boolStr,

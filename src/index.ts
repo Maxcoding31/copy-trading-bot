@@ -1,10 +1,14 @@
 import express from 'express';
+import path from 'path';
 import { loadConfig, getConfig } from './config';
 import { initDb, closeDb } from './db/sqlite';
 import { getKeypair } from './trade/solana';
 import { webhookRouter } from './webhook/handler';
 import { notifyStartup, notifyError } from './notify/telegram';
-import { getVirtualPnL, getVirtualPortfolio, getDailySpent, getOpenPositionCount } from './db/repo';
+import {
+  getVirtualPnL, getVirtualPortfolio, getDailySpent, getOpenPositionCount,
+  getRecentSourceTrades, getRecentVirtualTrades,
+} from './db/repo';
 import { logger } from './utils/logger';
 
 async function main(): Promise<void> {
@@ -14,6 +18,9 @@ async function main(): Promise<void> {
 
   const app = express();
   app.use(express.json({ limit: '1mb' }));
+
+  // Serve dashboard static files
+  app.use(express.static(path.resolve(__dirname, '..', 'public')));
 
   // Rate limiting on webhook endpoint
   let reqCount = 0;
@@ -69,6 +76,59 @@ async function main(): Promise<void> {
         totalReceived: +pnl.totalReceived.toFixed(6),
         netPnL: +pnl.pnl.toFixed(6),
       },
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // Dashboard API – single endpoint with all data for the frontend
+  app.get('/api/dashboard', (_req, res) => {
+    const pnl = getVirtualPnL();
+    const portfolio = getVirtualPortfolio();
+    const openPositions = getOpenPositionCount();
+    const dailySpent = getDailySpent();
+    const startingBalance = config.VIRTUAL_STARTING_BALANCE;
+    const currentBalance = startingBalance + pnl.pnl;
+    const pnlPercent = startingBalance > 0 ? (pnl.pnl / startingBalance) * 100 : 0;
+
+    res.json({
+      wallet: {
+        startingBalance,
+        currentBalance: +currentBalance.toFixed(6),
+        pnl: +pnl.pnl.toFixed(6),
+        pnlPercent: +pnlPercent.toFixed(2),
+        totalInvested: +pnl.totalSpent.toFixed(6),
+        totalReceived: +pnl.totalReceived.toFixed(6),
+      },
+      config: {
+        mode: config.DRY_RUN ? 'SIMULATION' : 'LIVE',
+        paused: config.PAUSE_TRADING,
+        copyRatio: config.COPY_RATIO,
+        maxSolPerTrade: config.MAX_SOL_PER_TRADE,
+        maxSolPerDay: config.MAX_SOL_PER_DAY,
+        maxOpenPositions: config.MAX_OPEN_POSITIONS,
+        slippageBps: config.SLIPPAGE_BPS,
+        sourceWallet: config.SOURCE_WALLET,
+        botWallet: keypair.publicKey.toBase58(),
+      },
+      budget: {
+        dailySpent: +dailySpent.toFixed(6),
+        dailyLimit: config.MAX_SOL_PER_DAY,
+        remaining: +(config.MAX_SOL_PER_DAY - dailySpent).toFixed(6),
+      },
+      positions: {
+        openCount: openPositions,
+        maxPositions: config.MAX_OPEN_POSITIONS,
+        details: portfolio.map((p) => ({
+          mint: p.mint,
+          tokens: p.token_amount,
+          invested: +p.total_spent.toFixed(6),
+          received: +p.total_received.toFixed(6),
+          pnl: +(p.total_received - p.total_spent).toFixed(6),
+        })),
+      },
+      sourceTrades: getRecentSourceTrades(100),
+      botTrades: getRecentVirtualTrades(100),
+      uptime: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
     });
   });

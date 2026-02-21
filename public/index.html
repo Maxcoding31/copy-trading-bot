@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Copy-Trading Bot — Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --text2: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922;
+    --green-bg: rgba(63,185,80,.12); --red-bg: rgba(248,81,73,.12);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; }
+
+  /* Header */
+  .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+  .header-left { display: flex; align-items: center; gap: 16px; }
+  .header h1 { font-size: 18px; font-weight: 600; }
+  .badge { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .badge-sim { background: rgba(210,153,34,.2); color: var(--yellow); }
+  .badge-live { background: var(--green-bg); color: var(--green); }
+  .badge-paused { background: var(--red-bg); color: var(--red); }
+  .header-right { display: flex; gap: 16px; font-size: 12px; color: var(--text2); }
+  .header-right span { display: flex; align-items: center; gap: 4px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot-green { background: var(--green); }
+  .dot-yellow { background: var(--yellow); }
+
+  /* Cards row */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; padding: 20px 24px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  .card-label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
+  .card-value { font-size: 28px; font-weight: 700; line-height: 1.2; }
+  .card-sub { font-size: 12px; color: var(--text2); margin-top: 6px; }
+  .positive { color: var(--green); }
+  .negative { color: var(--red); }
+
+  /* Config bar */
+  .config-bar { display: flex; gap: 24px; padding: 0 24px 16px; flex-wrap: wrap; }
+  .config-item { font-size: 12px; color: var(--text2); }
+  .config-item strong { color: var(--text); font-weight: 500; }
+
+  /* Sections */
+  .sections { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 24px 24px; }
+  @media (max-width: 900px) { .sections { grid-template-columns: 1fr; } }
+
+  .section { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .section-header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  .section-header h2 { font-size: 14px; font-weight: 600; }
+  .section-count { font-size: 11px; color: var(--text2); background: var(--bg); padding: 2px 8px; border-radius: 8px; }
+
+  /* Tables */
+  .table-wrap { overflow-x: auto; max-height: 400px; overflow-y: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th { position: sticky; top: 0; background: var(--surface); text-align: left; font-size: 11px; color: var(--text2); text-transform: uppercase; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover { background: rgba(88,166,255,.04); }
+
+  .dir-buy { color: var(--green); font-weight: 600; }
+  .dir-sell { color: var(--red); font-weight: 600; }
+  .action-copied { color: var(--green); }
+  .action-rejected { color: var(--yellow); }
+  .action-failed { color: var(--red); }
+  .action-detected { color: var(--text2); }
+
+  .mint { font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace; font-size: 11px; color: var(--accent); cursor: pointer; }
+  .mint:hover { text-decoration: underline; }
+
+  .empty-state { padding: 40px; text-align: center; color: var(--text2); }
+  .empty-state .icon { font-size: 32px; margin-bottom: 8px; }
+
+  /* Positions full width */
+  .positions-section { grid-column: 1 / -1; }
+
+  /* Refresh indicator */
+  .refresh { font-size: 11px; color: var(--text2); padding: 8px 24px; text-align: center; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <h1>Copy-Trading Bot</h1>
+    <span id="modeBadge" class="badge badge-sim">SIMULATION</span>
+  </div>
+  <div class="header-right">
+    <span><span class="dot dot-green" id="statusDot"></span> <span id="uptimeText">--</span></span>
+    <span>Ratio: <strong id="ratioText">--</strong></span>
+  </div>
+</div>
+
+<div class="cards">
+  <div class="card">
+    <div class="card-label">Solde Initial</div>
+    <div class="card-value" id="startBalance">--</div>
+    <div class="card-sub">SOL</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Solde Actuel</div>
+    <div class="card-value" id="currentBalance">--</div>
+    <div class="card-sub">SOL</div>
+  </div>
+  <div class="card">
+    <div class="card-label">PnL</div>
+    <div class="card-value" id="pnlValue">--</div>
+    <div class="card-sub" id="pnlPercent">--</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Positions Ouvertes</div>
+    <div class="card-value" id="openPos">--</div>
+    <div class="card-sub" id="maxPos">--</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Budget Jour</div>
+    <div class="card-value" id="dailySpent">--</div>
+    <div class="card-sub" id="dailyLimit">--</div>
+  </div>
+</div>
+
+<div class="config-bar">
+  <div class="config-item">Source: <strong id="sourceWallet">--</strong></div>
+  <div class="config-item">Bot Wallet: <strong id="botWallet">--</strong></div>
+  <div class="config-item">Max/trade: <strong id="maxTrade">--</strong></div>
+  <div class="config-item">Slippage: <strong id="slippage">--</strong></div>
+</div>
+
+<div class="sections">
+  <!-- Source wallet trades -->
+  <div class="section">
+    <div class="section-header">
+      <h2>Trades Source (wallet track&eacute;)</h2>
+      <span class="section-count" id="sourceCount">0</span>
+    </div>
+    <div class="table-wrap" id="sourceTableWrap">
+      <div class="empty-state">
+        <div class="icon">&#128225;</div>
+        En attente de trades du wallet source...
+      </div>
+    </div>
+  </div>
+
+  <!-- Bot virtual trades -->
+  <div class="section">
+    <div class="section-header">
+      <h2>Trades Bot (simulation)</h2>
+      <span class="section-count" id="botCount">0</span>
+    </div>
+    <div class="table-wrap" id="botTableWrap">
+      <div class="empty-state">
+        <div class="icon">&#129302;</div>
+        En attente de trades simul&eacute;s...
+      </div>
+    </div>
+  </div>
+
+  <!-- Open positions (full width) -->
+  <div class="section positions-section">
+    <div class="section-header">
+      <h2>Positions Ouvertes</h2>
+      <span class="section-count" id="posCount">0</span>
+    </div>
+    <div class="table-wrap" id="posTableWrap">
+      <div class="empty-state">
+        <div class="icon">&#128202;</div>
+        Aucune position ouverte
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="refresh" id="refreshText">Mise &agrave; jour en cours...</div>
+
+<script>
+const REFRESH_MS = 3000;
+const SHORT_MINT = (m) => m ? m.slice(0, 4) + '...' + m.slice(-4) : '??';
+const SOL = (v, d = 4) => v != null ? Number(v).toFixed(d) : '--';
+const SOLSCAN = (mint) => `https://solscan.io/token/${mint}`;
+const TIME = (iso) => {
+  if (!iso) return '--';
+  const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+  return d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+};
+
+function formatUptime(s) {
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'min';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h + 'h ' + m + 'min';
+}
+
+function actionClass(a) {
+  if (!a) return 'action-detected';
+  const l = a.toUpperCase();
+  if (l === 'COPIED') return 'action-copied';
+  if (l === 'REJECTED') return 'action-rejected';
+  if (l === 'FAILED') return 'action-failed';
+  return 'action-detected';
+}
+
+function actionLabel(a) {
+  if (!a) return 'En cours...';
+  const l = a.toUpperCase();
+  if (l === 'COPIED') return 'Copié';
+  if (l === 'REJECTED') return 'Rejeté';
+  if (l === 'FAILED') return 'Échoué';
+  if (l === 'DETECTED') return 'Détecté';
+  return a;
+}
+
+function renderSourceTable(trades) {
+  const el = document.getElementById('sourceTableWrap');
+  document.getElementById('sourceCount').textContent = trades.length;
+  if (!trades.length) {
+    el.innerHTML = '<div class="empty-state"><div class="icon">&#128225;</div>En attente de trades du wallet source...</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Heure</th><th>Dir.</th><th>Token</th><th>SOL Source</th><th>Action Bot</th><th>SOL Bot</th><th>Raison</th></tr></thead><tbody>';
+  for (const t of trades) {
+    const dir = t.direction === 'BUY' ? 'ACHAT' : 'VENTE';
+    const dirClass = t.direction === 'BUY' ? 'dir-buy' : 'dir-sell';
+    const ac = actionClass(t.bot_action);
+    const al = actionLabel(t.bot_action);
+    const botSol = t.bot_sol_amount > 0 ? SOL(t.bot_sol_amount) : '--';
+    const reason = t.reject_reason ? '<span title="' + t.reject_reason.replace(/"/g, '&quot;') + '">' + t.reject_reason.slice(0, 30) + (t.reject_reason.length > 30 ? '...' : '') + '</span>' : '--';
+    html += `<tr>
+      <td>${TIME(t.created_at)}</td>
+      <td class="${dirClass}">${dir}</td>
+      <td><a class="mint" href="${SOLSCAN(t.mint)}" target="_blank" title="${t.mint}">${SHORT_MINT(t.mint)}</a></td>
+      <td>${SOL(t.sol_amount)}</td>
+      <td class="${ac}">${al}</td>
+      <td>${botSol}</td>
+      <td style="font-size:11px;color:var(--text2);white-space:normal;max-width:180px">${reason}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function renderBotTable(trades) {
+  const el = document.getElementById('botTableWrap');
+  document.getElementById('botCount').textContent = trades.length;
+  if (!trades.length) {
+    el.innerHTML = '<div class="empty-state"><div class="icon">&#129302;</div>En attente de trades simulés...</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Heure</th><th>Dir.</th><th>Token</th><th>SOL</th><th>Tokens</th></tr></thead><tbody>';
+  for (const t of trades) {
+    const dir = t.direction === 'BUY' ? 'ACHAT' : 'VENTE';
+    const dirClass = t.direction === 'BUY' ? 'dir-buy' : 'dir-sell';
+    html += `<tr>
+      <td>${TIME(t.created_at)}</td>
+      <td class="${dirClass}">${dir}</td>
+      <td><a class="mint" href="${SOLSCAN(t.mint)}" target="_blank" title="${t.mint}">${SHORT_MINT(t.mint)}</a></td>
+      <td>${SOL(t.sol_amount)}</td>
+      <td style="font-size:11px;color:var(--text2)">${t.token_amount}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function renderPositions(positions) {
+  const el = document.getElementById('posTableWrap');
+  document.getElementById('posCount').textContent = positions.openCount;
+  const details = positions.details || [];
+  if (!details.length) {
+    el.innerHTML = '<div class="empty-state"><div class="icon">&#128202;</div>Aucune position ouverte</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Token</th><th>Investi</th><th>Reçu</th><th>PnL</th></tr></thead><tbody>';
+  for (const p of details) {
+    const pnlClass = p.pnl >= 0 ? 'positive' : 'negative';
+    const pnlSign = p.pnl >= 0 ? '+' : '';
+    html += `<tr>
+      <td><a class="mint" href="${SOLSCAN(p.mint)}" target="_blank" title="${p.mint}">${SHORT_MINT(p.mint)}</a></td>
+      <td>${SOL(p.invested)} SOL</td>
+      <td>${SOL(p.received)} SOL</td>
+      <td class="${pnlClass}">${pnlSign}${SOL(p.pnl)} SOL</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/dashboard');
+    const d = await res.json();
+
+    // Mode badge
+    const badge = document.getElementById('modeBadge');
+    if (d.config.paused) { badge.textContent = 'EN PAUSE'; badge.className = 'badge badge-paused'; }
+    else if (d.config.mode === 'SIMULATION') { badge.textContent = 'SIMULATION'; badge.className = 'badge badge-sim'; }
+    else { badge.textContent = 'LIVE'; badge.className = 'badge badge-live'; }
+
+    // Header
+    document.getElementById('uptimeText').textContent = 'Up ' + formatUptime(d.uptime);
+    document.getElementById('ratioText').textContent = (d.config.copyRatio * 100) + '%';
+
+    // Cards
+    document.getElementById('startBalance').textContent = SOL(d.wallet.startingBalance);
+    document.getElementById('currentBalance').textContent = SOL(d.wallet.currentBalance);
+
+    const pnlEl = document.getElementById('pnlValue');
+    const pnlPctEl = document.getElementById('pnlPercent');
+    const pnlSign = d.wallet.pnl >= 0 ? '+' : '';
+    pnlEl.textContent = pnlSign + SOL(d.wallet.pnl);
+    pnlEl.className = 'card-value ' + (d.wallet.pnl >= 0 ? 'positive' : 'negative');
+    pnlPctEl.textContent = pnlSign + d.wallet.pnlPercent + '%';
+    pnlPctEl.className = 'card-sub ' + (d.wallet.pnl >= 0 ? 'positive' : 'negative');
+
+    document.getElementById('openPos').textContent = d.positions.openCount;
+    document.getElementById('maxPos').textContent = '/ ' + d.positions.maxPositions + ' max';
+
+    document.getElementById('dailySpent').textContent = SOL(d.budget.dailySpent);
+    document.getElementById('dailyLimit').textContent = SOL(d.budget.remaining) + ' restant / ' + SOL(d.budget.dailyLimit);
+
+    // Config bar
+    document.getElementById('sourceWallet').textContent = SHORT_MINT(d.config.sourceWallet);
+    document.getElementById('sourceWallet').title = d.config.sourceWallet;
+    document.getElementById('botWallet').textContent = SHORT_MINT(d.config.botWallet);
+    document.getElementById('botWallet').title = d.config.botWallet;
+    document.getElementById('maxTrade').textContent = d.config.maxSolPerTrade + ' SOL';
+    document.getElementById('slippage').textContent = d.config.slippageBps + ' bps';
+
+    // Tables
+    renderSourceTable(d.sourceTrades || []);
+    renderBotTable(d.botTrades || []);
+    renderPositions(d.positions);
+
+    document.getElementById('refreshText').textContent = 'Dernière MAJ : ' + new Date().toLocaleTimeString('fr-FR');
+  } catch (err) {
+    document.getElementById('refreshText').textContent = 'Erreur de connexion...';
+    document.getElementById('statusDot').className = 'dot';
+    document.getElementById('statusDot').style.background = 'var(--red)';
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

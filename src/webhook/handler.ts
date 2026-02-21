@@ -1,6 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { getConfig, SOL_MINT, lamportsToSol } from '../config';
-import { isEventProcessed, markEventProcessed } from '../db/repo';
+import { isEventProcessed, markEventProcessed, recordSourceTrade, updateSourceTradeAction } from '../db/repo';
 import { evaluateRisk } from '../risk/engine';
 import { executeSwap } from '../trade/jupiter';
 import { updatePosition } from '../trade/position';
@@ -114,10 +114,19 @@ async function processTx(tx: HeliusEnhancedTx, sourceWallet: string): Promise<vo
 
   markEventProcessed(tx.signature);
 
+  recordSourceTrade(
+    parsed.signature,
+    parsed.direction,
+    parsed.tokenMint,
+    parsed.solAmount,
+    parsed.tokenAmount.toString(),
+  );
+
   // Risk evaluation (includes Jupiter quote)
   const riskResult = await evaluateRisk(parsed);
 
   if (riskResult.action === 'REJECT') {
+    updateSourceTradeAction(parsed.signature, 'REJECTED', 0, riskResult.reason);
     logger.warn({ reason: riskResult.reason, sig: parsed.signature }, 'Trade rejected');
     notifyTradeRejected(parsed, riskResult.reason ?? 'Unknown');
     return;
@@ -128,11 +137,15 @@ async function processTx(tx: HeliusEnhancedTx, sourceWallet: string): Promise<vo
   const result = await executeSwap(plan);
 
   if (result.success) {
-    // Update position using the Jupiter quote's outAmount (= what the BOT receives)
+    const botSol = plan.direction === 'BUY'
+      ? Number(plan.amountRaw) / 1e9
+      : Number(plan.quote.outAmount) / 1e9;
+    updateSourceTradeAction(parsed.signature, 'COPIED', botSol);
     updatePosition(plan, result.quoteOutAmount ?? plan.quote.outAmount);
     notifyTradeExecuted(parsed, plan, result.txSignature);
     logger.info({ sig: result.txSignature, dir: plan.direction, mint: plan.mint }, 'Trade executed');
   } else {
+    updateSourceTradeAction(parsed.signature, 'FAILED', 0, result.error);
     logger.error({ error: result.error, dir: plan.direction, mint: plan.mint }, 'Trade failed');
     notifyError(`Trade failed for ${plan.mint}: ${result.error}`);
   }
