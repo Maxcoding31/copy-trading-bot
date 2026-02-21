@@ -5,7 +5,7 @@ import { addDailySpent, updateCooldown, recordVirtualTrade, getVirtualPnL } from
 import { logger } from '../utils/logger';
 import type { TradePlan } from '../risk/engine';
 
-const JUPITER_API = 'https://quote-api.jup.ag/v6';
+const JUPITER_API = 'https://api.jup.ag/swap/v1';
 
 // Aggressive retry for memecoins – every ms counts
 const MAX_RETRIES = 3;
@@ -38,9 +38,11 @@ export async function getJupiterQuote(
     asLegacyTransaction: 'false',
   });
 
+  const headers: Record<string, string> = { 'x-api-key': config.JUPITER_API_KEY };
+
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await fetch(`${JUPITER_API}/quote?${params}`);
+      const res = await fetch(`${JUPITER_API}/quote?${params}`, { headers });
       if (!res.ok) {
         const body = await res.text();
         logger.warn({ status: res.status, body, attempt }, 'Jupiter quote failed');
@@ -95,7 +97,7 @@ export async function executeSwap(plan: TradePlan): Promise<SwapResult> {
     // ── LIVE: build swap transaction from the pre-fetched quote ──
     const swapRes = await fetchWithRetry(`${JUPITER_API}/swap`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-api-key': config.JUPITER_API_KEY },
       body: JSON.stringify({
         quoteResponse: quote,
         userPublicKey: keypair.publicKey.toBase58(),

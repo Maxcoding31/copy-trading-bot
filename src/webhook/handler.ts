@@ -117,7 +117,18 @@ async function processTx(tx: HeliusEnhancedTx, sourceWallet: string): Promise<vo
   const parsed = parseSwap(tx, sourceWallet);
   if (!parsed) {
     markEventProcessed(tx.signature);
-    logger.info({ sig: tx.signature, type: tx.type }, 'Not a parseable swap, skipping');
+    logger.info(
+      {
+        sig: tx.signature,
+        type: tx.type,
+        source: tx.source,
+        nativeTransferCount: (tx.nativeTransfers ?? []).length,
+        tokenTransferCount: (tx.tokenTransfers ?? []).length,
+        hasSwapEvent: !!tx.events?.swap,
+        description: tx.description?.slice(0, 200),
+      },
+      'Not a parseable swap, skipping',
+    );
     return;
   }
 
@@ -237,14 +248,17 @@ function parseSwapFallback(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSw
   const nativeTransfers = tx.nativeTransfers ?? [];
   const tokenTransfers = tx.tokenTransfers ?? [];
 
+  // SOL sent FROM the source wallet (to any destination)
   const solOut = nativeTransfers
     .filter((t) => t.fromUserAccount === sourceWallet)
     .reduce((sum, t) => sum + t.amount, 0);
 
+  // SOL received BY the source wallet (from any source)
   const solIn = nativeTransfers
     .filter((t) => t.toUserAccount === sourceWallet)
     .reduce((sum, t) => sum + t.amount, 0);
 
+  // Non-SOL tokens received/sent by source wallet
   const tokensReceived = tokenTransfers.filter(
     (t) => t.toUserAccount === sourceWallet && t.mint !== SOL_MINT,
   );
@@ -252,6 +266,7 @@ function parseSwapFallback(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSw
     (t) => t.fromUserAccount === sourceWallet && t.mint !== SOL_MINT,
   );
 
+  // BUY: SOL goes out, tokens come in
   if (solOut > 0 && tokensReceived.length > 0 && tokensSent.length === 0) {
     const tkn = tokensReceived[0];
     return {
@@ -264,6 +279,7 @@ function parseSwapFallback(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSw
     };
   }
 
+  // SELL: tokens go out, SOL comes in
   if (solIn > 0 && tokensSent.length > 0 && tokensReceived.length === 0) {
     const tkn = tokensSent[0];
     return {
@@ -274,6 +290,39 @@ function parseSwapFallback(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSw
       tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
       tokenDecimals: 6,
     };
+  }
+
+  // SELL variant: tokens go out, SOL comes in, but also some tokens received
+  // (e.g. pump.fun may send back dust or use a complex routing)
+  if (solIn > 0 && tokensSent.length > 0) {
+    const netSol = solIn - solOut;
+    if (netSol > 0) {
+      const tkn = tokensSent[0];
+      return {
+        signature: tx.signature,
+        direction: 'SELL',
+        tokenMint: tkn.mint,
+        solAmount: lamportsToSol(netSol),
+        tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
+        tokenDecimals: 6,
+      };
+    }
+  }
+
+  // BUY variant: SOL goes out, tokens come in, but with net SOL outflow
+  if (solOut > 0 && tokensReceived.length > 0) {
+    const netSol = solOut - solIn;
+    if (netSol > 0) {
+      const tkn = tokensReceived[0];
+      return {
+        signature: tx.signature,
+        direction: 'BUY',
+        tokenMint: tkn.mint,
+        solAmount: lamportsToSol(netSol),
+        tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
+        tokenDecimals: 6,
+      };
+    }
   }
 
   return null;

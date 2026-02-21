@@ -11,6 +11,9 @@ const configSchema = z.object({
   HELIUS_API_KEY: z.string().min(1, 'HELIUS_API_KEY is required'),
   RPC_URL: z.string().url('RPC_URL must be a valid URL'),
 
+  // Jupiter
+  JUPITER_API_KEY: z.string().min(1, 'JUPITER_API_KEY is required'),
+
   // Bot wallet
   BOT_PRIVATE_KEY_BASE58: z.string().min(32, 'BOT_PRIVATE_KEY_BASE58 is required'),
 
