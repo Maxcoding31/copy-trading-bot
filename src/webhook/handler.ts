@@ -267,13 +267,15 @@ function parseSwapFallback(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSw
     .filter((t) => t.toUserAccount === sourceWallet)
     .reduce((sum, t) => sum + t.amount, 0);
 
-  // Non-SOL tokens received/sent by source wallet
+  // Non-SOL tokens received/sent by source wallet (strict match)
   const tokensReceived = tokenTransfers.filter(
     (t) => t.toUserAccount === sourceWallet && t.mint !== SOL_MINT,
   );
   const tokensSent = tokenTransfers.filter(
     (t) => t.fromUserAccount === sourceWallet && t.mint !== SOL_MINT,
   );
+
+  // ── Strict matching (fromUserAccount / toUserAccount === sourceWallet) ──
 
   // BUY: SOL goes out, tokens come in
   if (solOut > 0 && tokensReceived.length > 0 && tokensSent.length === 0) {
@@ -302,7 +304,6 @@ function parseSwapFallback(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSw
   }
 
   // SELL variant: tokens go out, SOL comes in, but also some tokens received
-  // (e.g. pump.fun may send back dust or use a complex routing)
   if (solIn > 0 && tokensSent.length > 0) {
     const netSol = solIn - solOut;
     if (netSol > 0) {
@@ -328,6 +329,46 @@ function parseSwapFallback(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSw
         direction: 'BUY',
         tokenMint: tkn.mint,
         solAmount: lamportsToSol(netSol),
+        tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
+        tokenDecimals: 6,
+      };
+    }
+  }
+
+  // ── Broad fallback (for platforms like Pump.fun where token transfer  ──
+  // ── fromUserAccount may be a program account, not the source wallet)  ──
+
+  const netSol = solIn - solOut;
+  const allTokens = tokenTransfers.filter((t) => t.mint !== SOL_MINT);
+
+  if (allTokens.length > 0 && netSol !== 0) {
+    const tkn = allTokens[0];
+
+    if (netSol > 0) {
+      // Net SOL flowing IN to the wallet + token transfers exist → SELL
+      logger.info(
+        { sig: tx.signature, netSolLamports: netSol, mint: tkn.mint, tokenAmount: tkn.tokenAmount },
+        'Broad fallback: detected as SELL (net SOL inflow + token transfer)',
+      );
+      return {
+        signature: tx.signature,
+        direction: 'SELL',
+        tokenMint: tkn.mint,
+        solAmount: lamportsToSol(netSol),
+        tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
+        tokenDecimals: 6,
+      };
+    } else {
+      // Net SOL flowing OUT from the wallet + token transfers exist → BUY
+      logger.info(
+        { sig: tx.signature, netSolLamports: Math.abs(netSol), mint: tkn.mint, tokenAmount: tkn.tokenAmount },
+        'Broad fallback: detected as BUY (net SOL outflow + token transfer)',
+      );
+      return {
+        signature: tx.signature,
+        direction: 'BUY',
+        tokenMint: tkn.mint,
+        solAmount: lamportsToSol(Math.abs(netSol)),
         tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
         tokenDecimals: 6,
       };
