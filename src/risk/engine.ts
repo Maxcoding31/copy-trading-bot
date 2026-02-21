@@ -69,9 +69,11 @@ async function evaluateBuy(swap: ParsedSwap, config: ReturnType<typeof getConfig
     }
   }
 
-  const safety = await checkTokenSafety(connection, mint);
-  if (!safety.safe) {
-    return reject(`Token unsafe: ${safety.reason}`);
+  if (config.BLOCK_IF_MINT_AUTHORITY || config.BLOCK_IF_FREEZE_AUTHORITY) {
+    const safety = await checkTokenSafety(connection, mint);
+    if (!safety.safe) {
+      return reject(`Token unsafe: ${safety.reason}`);
+    }
   }
 
   const amountLamports = solToLamports(mySol);
@@ -140,28 +142,9 @@ async function evaluateSell(swap: ParsedSwap, config: ReturnType<typeof getConfi
     return reject(`No Jupiter route found for selling ${mint}`);
   }
 
-  let priceImpactBps = Math.round((quote.priceImpactPct ?? 0) * 10000);
+  const priceImpactBps = Math.round((quote.priceImpactPct ?? 0) * 10000);
   if (priceImpactBps > config.MAX_PRICE_IMPACT_BPS) {
-    // Try half amount on high-impact sells rather than refusing
-    const halfAmount = myTokenToSell / 2n;
-    if (halfAmount > 0n) {
-      logger.warn({ mint, priceImpactBps }, 'Price impact too high on sell, trying half amount');
-      const halfQuote = await getJupiterQuote(mint, SOL_MINT, halfAmount);
-      if (halfQuote) {
-        const halfImpact = Math.round((halfQuote.priceImpactPct ?? 0) * 10000);
-        if (halfImpact <= config.MAX_PRICE_IMPACT_BPS) {
-          myTokenToSell = halfAmount;
-          quote = halfQuote;
-          priceImpactBps = halfImpact;
-        } else {
-          return reject(`Price impact still too high (${halfImpact}bps) even at half for ${mint}`);
-        }
-      } else {
-        return reject(`No Jupiter route for reduced sell of ${mint}`);
-      }
-    } else {
-      return reject(`Price impact ${priceImpactBps}bps exceeds max on sell for ${mint}`);
-    }
+    logger.warn({ mint, priceImpactBps }, 'High price impact on sell, proceeding anyway');
   }
 
   logger.info(
