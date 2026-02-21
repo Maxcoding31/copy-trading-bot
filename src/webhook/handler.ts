@@ -74,6 +74,11 @@ webhookRouter.post('/helius', async (req: Request, res: Response) => {
   const payload: HeliusEnhancedTx[] = Array.isArray(req.body) ? req.body : [req.body];
   const config = getConfig();
 
+  logger.info(
+    { count: payload.length, types: payload.map((t) => t.type), feePayers: payload.map((t) => t.feePayer) },
+    'Webhook received',
+  );
+
   for (const tx of payload) {
     try {
       await processTx(tx, config.SOURCE_WALLET);
@@ -86,12 +91,12 @@ webhookRouter.post('/helius', async (req: Request, res: Response) => {
 
 async function processTx(tx: HeliusEnhancedTx, sourceWallet: string): Promise<void> {
   if (tx.type !== 'SWAP') {
-    logger.debug({ type: tx.type, sig: tx.signature }, 'Ignoring non-SWAP event');
+    logger.info({ type: tx.type, sig: tx.signature }, 'Ignoring non-SWAP event');
     return;
   }
 
   if (tx.feePayer !== sourceWallet) {
-    logger.debug({ feePayer: tx.feePayer, sig: tx.signature }, 'Ignoring swap from other wallet');
+    logger.info({ feePayer: tx.feePayer, expected: sourceWallet, sig: tx.signature }, 'Ignoring swap from other wallet');
     return;
   }
 

@@ -32,6 +32,7 @@ async function main(): Promise<void> {
       res.status(429).json({ error: 'Too many requests' });
       return;
     }
+    logger.info({ method: _req.method, path: _req.path, ip: _req.ip }, 'Webhook request incoming');
     next();
   });
 
