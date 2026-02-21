@@ -122,12 +122,21 @@ async function processTx(tx: HeliusEnhancedTx, sourceWallet: string): Promise<vo
         sig: tx.signature,
         type: tx.type,
         source: tx.source,
-        nativeTransferCount: (tx.nativeTransfers ?? []).length,
-        tokenTransferCount: (tx.tokenTransfers ?? []).length,
+        nativeTransfers: (tx.nativeTransfers ?? []).map((t) => ({
+          from: t.fromUserAccount,
+          to: t.toUserAccount,
+          amount: t.amount,
+        })),
+        tokenTransfers: (tx.tokenTransfers ?? []).map((t) => ({
+          from: t.fromUserAccount,
+          to: t.toUserAccount,
+          mint: t.mint,
+          amount: t.tokenAmount,
+        })),
         hasSwapEvent: !!tx.events?.swap,
         description: tx.description?.slice(0, 200),
       },
-      'Not a parseable swap, skipping',
+      'Not a parseable swap – raw data dump',
     );
     return;
   }
