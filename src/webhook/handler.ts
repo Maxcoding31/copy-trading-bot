@@ -90,25 +90,34 @@ webhookRouter.post('/helius', async (req: Request, res: Response) => {
 });
 
 async function processTx(tx: HeliusEnhancedTx, sourceWallet: string): Promise<void> {
-  if (tx.type !== 'SWAP') {
-    logger.info({ type: tx.type, sig: tx.signature }, 'Ignoring non-SWAP event');
-    return;
-  }
-
-  if (tx.feePayer !== sourceWallet) {
-    logger.info({ feePayer: tx.feePayer, expected: sourceWallet, sig: tx.signature }, 'Ignoring swap from other wallet');
-    return;
-  }
-
   if (isEventProcessed(tx.signature)) {
-    logger.debug({ sig: tx.signature }, 'Duplicate event, skipping');
     return;
   }
 
+  // Check if the source wallet is involved in this transaction
+  // (as feePayer, or in any transfer). This supports platforms like
+  // Terminal Padre where the feePayer is a relayer, not the user.
+  const walletInvolved = isWalletInvolved(tx, sourceWallet);
+
+  if (!walletInvolved) {
+    logger.info(
+      { type: tx.type, feePayer: tx.feePayer, sig: tx.signature },
+      'Wallet not involved in this tx, skipping',
+    );
+    return;
+  }
+
+  logger.info(
+    { type: tx.type, feePayer: tx.feePayer, sig: tx.signature, source: tx.source },
+    'Transaction involving source wallet detected',
+  );
+
+  // Try to parse as a swap (works for SWAP type and also for
+  // transfers that are actually swaps routed through aggregators)
   const parsed = parseSwap(tx, sourceWallet);
   if (!parsed) {
     markEventProcessed(tx.signature);
-    logger.info({ sig: tx.signature }, 'Unparseable swap (token-token?), skipping');
+    logger.info({ sig: tx.signature, type: tx.type }, 'Not a parseable swap, skipping');
     return;
   }
 
@@ -194,6 +203,34 @@ function parseSwap(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSwap | nul
   }
 
   return null;
+}
+
+/**
+ * Check if the source wallet is involved in the transaction in any way:
+ * feePayer, token transfers, native transfers, or swap events.
+ */
+function isWalletInvolved(tx: HeliusEnhancedTx, wallet: string): boolean {
+  if (tx.feePayer === wallet) return true;
+
+  const natives = tx.nativeTransfers ?? [];
+  if (natives.some((t) => t.fromUserAccount === wallet || t.toUserAccount === wallet)) return true;
+
+  const tokens = tx.tokenTransfers ?? [];
+  if (tokens.some((t) => t.fromUserAccount === wallet || t.toUserAccount === wallet)) return true;
+
+  const swap = tx.events?.swap;
+  if (swap) {
+    const inputs = swap.tokenInputs ?? [];
+    const outputs = swap.tokenOutputs ?? [];
+    if (inputs.some((t) => t.userAccount === wallet)) return true;
+    if (outputs.some((t) => t.userAccount === wallet)) return true;
+    if (swap.nativeInput?.account === wallet) return true;
+    if (swap.nativeOutput?.account === wallet) return true;
+  }
+
+  if (tx.description?.includes(wallet)) return true;
+
+  return false;
 }
 
 function parseSwapFallback(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSwap | null {
