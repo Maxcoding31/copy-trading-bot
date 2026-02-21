@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: solana-copy-bot
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - bot-data:/app/data
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - DB_PATH=/app/data/bot.db
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:
+    driver: local

@@ -1,0 +1,225 @@
+import { Request, Response, Router } from 'express';
+import { getConfig, SOL_MINT, lamportsToSol } from '../config';
+import { isEventProcessed, markEventProcessed } from '../db/repo';
+import { evaluateRisk } from '../risk/engine';
+import { executeSwap } from '../trade/jupiter';
+import { updatePosition } from '../trade/position';
+import { notifyTradeExecuted, notifyTradeRejected, notifyError } from '../notify/telegram';
+import { logger } from '../utils/logger';
+
+// ── Helius Enhanced transaction types ──────────────
+
+interface TokenTransfer {
+  fromUserAccount: string;
+  toUserAccount: string;
+  fromTokenAccount: string;
+  toTokenAccount: string;
+  tokenAmount: number;
+  mint: string;
+  tokenStandard: string;
+}
+
+interface NativeTransfer {
+  fromUserAccount: string;
+  toUserAccount: string;
+  amount: number;
+}
+
+interface HeliusEnhancedTx {
+  signature: string;
+  type: string;
+  source: string;
+  fee: number;
+  feePayer: string;
+  timestamp: number;
+  description: string;
+  nativeTransfers?: NativeTransfer[];
+  tokenTransfers?: TokenTransfer[];
+  events?: {
+    swap?: {
+      nativeInput?: { account: string; amount: string };
+      nativeOutput?: { account: string; amount: string };
+      tokenInputs?: Array<{
+        userAccount: string;
+        tokenAccount: string;
+        mint: string;
+        rawTokenAmount: { tokenAmount: string; decimals: number };
+      }>;
+      tokenOutputs?: Array<{
+        userAccount: string;
+        tokenAccount: string;
+        mint: string;
+        rawTokenAmount: { tokenAmount: string; decimals: number };
+      }>;
+    };
+  };
+}
+
+export interface ParsedSwap {
+  signature: string;
+  direction: 'BUY' | 'SELL';
+  tokenMint: string;
+  /** SOL amount the source spent (BUY) or received (SELL) */
+  solAmount: number;
+  /** Token amount the source received (BUY) or sent (SELL) */
+  tokenAmount: bigint;
+  tokenDecimals: number;
+}
+
+export const webhookRouter = Router();
+
+webhookRouter.post('/helius', async (req: Request, res: Response) => {
+  res.status(200).json({ ok: true });
+
+  const payload: HeliusEnhancedTx[] = Array.isArray(req.body) ? req.body : [req.body];
+  const config = getConfig();
+
+  for (const tx of payload) {
+    try {
+      await processTx(tx, config.SOURCE_WALLET);
+    } catch (err) {
+      logger.error({ err, signature: tx?.signature }, 'Error processing webhook event');
+      notifyError(`Webhook error: ${(err as Error).message}`);
+    }
+  }
+});
+
+async function processTx(tx: HeliusEnhancedTx, sourceWallet: string): Promise<void> {
+  if (tx.type !== 'SWAP') {
+    logger.debug({ type: tx.type, sig: tx.signature }, 'Ignoring non-SWAP event');
+    return;
+  }
+
+  if (tx.feePayer !== sourceWallet) {
+    logger.debug({ feePayer: tx.feePayer, sig: tx.signature }, 'Ignoring swap from other wallet');
+    return;
+  }
+
+  if (isEventProcessed(tx.signature)) {
+    logger.debug({ sig: tx.signature }, 'Duplicate event, skipping');
+    return;
+  }
+
+  const parsed = parseSwap(tx, sourceWallet);
+  if (!parsed) {
+    markEventProcessed(tx.signature);
+    logger.info({ sig: tx.signature }, 'Unparseable swap (token-token?), skipping');
+    return;
+  }
+
+  logger.info(
+    { direction: parsed.direction, token: parsed.tokenMint, sol: parsed.solAmount, sig: parsed.signature },
+    'Source wallet swap detected',
+  );
+
+  markEventProcessed(tx.signature);
+
+  // Risk evaluation (includes Jupiter quote)
+  const riskResult = await evaluateRisk(parsed);
+
+  if (riskResult.action === 'REJECT') {
+    logger.warn({ reason: riskResult.reason, sig: parsed.signature }, 'Trade rejected');
+    notifyTradeRejected(parsed, riskResult.reason ?? 'Unknown');
+    return;
+  }
+
+  // Execute swap using the pre-validated quote from risk engine
+  const plan = riskResult.tradePlan!;
+  const result = await executeSwap(plan);
+
+  if (result.success) {
+    // Update position using the Jupiter quote's outAmount (= what the BOT receives)
+    updatePosition(plan, result.quoteOutAmount ?? plan.quote.outAmount);
+    notifyTradeExecuted(parsed, plan, result.txSignature);
+    logger.info({ sig: result.txSignature, dir: plan.direction, mint: plan.mint }, 'Trade executed');
+  } else {
+    logger.error({ error: result.error, dir: plan.direction, mint: plan.mint }, 'Trade failed');
+    notifyError(`Trade failed for ${plan.mint}: ${result.error}`);
+  }
+}
+
+// ── Swap parsing ───────────────────────────────────
+
+function parseSwap(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSwap | null {
+  const swap = tx.events?.swap;
+  if (!swap) return parseSwapFallback(tx, sourceWallet);
+
+  const nativeIn = swap.nativeInput;
+  const nativeOut = swap.nativeOutput;
+  const tokenInputs = swap.tokenInputs ?? [];
+  const tokenOutputs = swap.tokenOutputs ?? [];
+
+  // BUY: SOL in → token out
+  if (nativeIn && BigInt(nativeIn.amount) > 0n && tokenOutputs.length > 0) {
+    const tok = tokenOutputs[0];
+    return {
+      signature: tx.signature,
+      direction: 'BUY',
+      tokenMint: tok.mint,
+      solAmount: lamportsToSol(BigInt(nativeIn.amount)),
+      tokenAmount: BigInt(tok.rawTokenAmount.tokenAmount),
+      tokenDecimals: tok.rawTokenAmount.decimals,
+    };
+  }
+
+  // SELL: token in → SOL out
+  if (nativeOut && BigInt(nativeOut.amount) > 0n && tokenInputs.length > 0) {
+    const tok = tokenInputs[0];
+    return {
+      signature: tx.signature,
+      direction: 'SELL',
+      tokenMint: tok.mint,
+      solAmount: lamportsToSol(BigInt(nativeOut.amount)),
+      tokenAmount: BigInt(tok.rawTokenAmount.tokenAmount),
+      tokenDecimals: tok.rawTokenAmount.decimals,
+    };
+  }
+
+  return null;
+}
+
+function parseSwapFallback(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSwap | null {
+  const nativeTransfers = tx.nativeTransfers ?? [];
+  const tokenTransfers = tx.tokenTransfers ?? [];
+
+  const solOut = nativeTransfers
+    .filter((t) => t.fromUserAccount === sourceWallet)
+    .reduce((sum, t) => sum + t.amount, 0);
+
+  const solIn = nativeTransfers
+    .filter((t) => t.toUserAccount === sourceWallet)
+    .reduce((sum, t) => sum + t.amount, 0);
+
+  const tokensReceived = tokenTransfers.filter(
+    (t) => t.toUserAccount === sourceWallet && t.mint !== SOL_MINT,
+  );
+  const tokensSent = tokenTransfers.filter(
+    (t) => t.fromUserAccount === sourceWallet && t.mint !== SOL_MINT,
+  );
+
+  if (solOut > 0 && tokensReceived.length > 0 && tokensSent.length === 0) {
+    const tkn = tokensReceived[0];
+    return {
+      signature: tx.signature,
+      direction: 'BUY',
+      tokenMint: tkn.mint,
+      solAmount: lamportsToSol(solOut),
+      tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
+      tokenDecimals: 6,
+    };
+  }
+
+  if (solIn > 0 && tokensSent.length > 0 && tokensReceived.length === 0) {
+    const tkn = tokensSent[0];
+    return {
+      signature: tx.signature,
+      direction: 'SELL',
+      tokenMint: tkn.mint,
+      solAmount: lamportsToSol(solIn),
+      tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
+      tokenDecimals: 6,
+    };
+  }
+
+  return null;
+}

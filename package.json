@@ -1,0 +1,33 @@
+{
+  "name": "solana-copy-trading-bot",
+  "version": "1.0.0",
+  "description": "Solana copy-trading bot using Helius webhooks and Jupiter v6",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "register-webhook": "tsx src/scripts/registerWebhook.ts",
+    "generate-wallet": "tsx src/scripts/generateWallet.ts"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@solana/web3.js": "^1.95.0",
+    "better-sqlite3": "^11.7.0",
+    "express": "^4.21.0",
+    "pino": "^9.5.0",
+    "pino-pretty": "^13.0.0",
+    "zod": "^3.24.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
