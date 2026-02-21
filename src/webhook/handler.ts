@@ -1,9 +1,11 @@
 import { Request, Response, Router } from 'express';
-import { getConfig, SOL_MINT, lamportsToSol } from '../config';
+import { getConfig } from '../config';
 import { isEventProcessed, markEventProcessed, recordSourceTrade, updateSourceTradeAction } from '../db/repo';
 import { evaluateRisk } from '../risk/engine';
 import { executeSwap } from '../trade/jupiter';
 import { updatePosition } from '../trade/position';
+import { getSharedConnection } from '../trade/solana';
+import { parseSwapFromRpc } from '../monitor/wsMonitor';
 import { notifyTradeExecuted, notifyTradeRejected, notifyError } from '../notify/telegram';
 import { logger } from '../utils/logger';
 
@@ -109,41 +111,23 @@ async function processTx(tx: HeliusEnhancedTx, sourceWallet: string): Promise<vo
 
   logger.info(
     { type: tx.type, feePayer: tx.feePayer, sig: tx.signature, source: tx.source },
-    'Transaction involving source wallet detected',
+    'Transaction involving source wallet detected (webhook)',
   );
 
-  // Try to parse as a swap (works for SWAP type and also for
-  // transfers that are actually swaps routed through aggregators)
-  const parsed = parseSwap(tx, sourceWallet);
+  // Use RPC pre/post balances for accurate parsing
+  // (Helius nativeTransfers can be incomplete for Pump.fun)
+  const connection = getSharedConnection();
+  const parsed = await parseSwapFromRpc(connection, tx.signature, sourceWallet);
+
   if (!parsed) {
     markEventProcessed(tx.signature);
-    logger.info(
-      {
-        sig: tx.signature,
-        type: tx.type,
-        source: tx.source,
-        nativeTransfers: (tx.nativeTransfers ?? []).map((t) => ({
-          from: t.fromUserAccount,
-          to: t.toUserAccount,
-          amount: t.amount,
-        })),
-        tokenTransfers: (tx.tokenTransfers ?? []).map((t) => ({
-          from: t.fromUserAccount,
-          to: t.toUserAccount,
-          mint: t.mint,
-          amount: t.tokenAmount,
-        })),
-        hasSwapEvent: !!tx.events?.swap,
-        description: tx.description?.slice(0, 200),
-      },
-      'Not a parseable swap – raw data dump',
-    );
+    logger.info({ sig: tx.signature, type: tx.type, source: tx.source }, 'Not a parseable swap (RPC check)');
     return;
   }
 
   logger.info(
     { direction: parsed.direction, token: parsed.tokenMint, sol: parsed.solAmount, sig: parsed.signature },
-    'Source wallet swap detected (webhook)',
+    'Source wallet swap detected (webhook+RPC)',
   );
 
   await handleParsedSwap(parsed);
@@ -193,46 +177,6 @@ export async function handleParsedSwap(parsed: ParsedSwap): Promise<void> {
   }
 }
 
-// ── Swap parsing ───────────────────────────────────
-
-function parseSwap(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSwap | null {
-  const swap = tx.events?.swap;
-  if (!swap) return parseSwapFallback(tx, sourceWallet);
-
-  const nativeIn = swap.nativeInput;
-  const nativeOut = swap.nativeOutput;
-  const tokenInputs = swap.tokenInputs ?? [];
-  const tokenOutputs = swap.tokenOutputs ?? [];
-
-  // BUY: SOL in → token out
-  if (nativeIn && BigInt(nativeIn.amount) > 0n && tokenOutputs.length > 0) {
-    const tok = tokenOutputs[0];
-    return {
-      signature: tx.signature,
-      direction: 'BUY',
-      tokenMint: tok.mint,
-      solAmount: lamportsToSol(BigInt(nativeIn.amount)),
-      tokenAmount: BigInt(tok.rawTokenAmount.tokenAmount),
-      tokenDecimals: tok.rawTokenAmount.decimals,
-    };
-  }
-
-  // SELL: token in → SOL out
-  if (nativeOut && BigInt(nativeOut.amount) > 0n && tokenInputs.length > 0) {
-    const tok = tokenInputs[0];
-    return {
-      signature: tx.signature,
-      direction: 'SELL',
-      tokenMint: tok.mint,
-      solAmount: lamportsToSol(BigInt(nativeOut.amount)),
-      tokenAmount: BigInt(tok.rawTokenAmount.tokenAmount),
-      tokenDecimals: tok.rawTokenAmount.decimals,
-    };
-  }
-
-  return null;
-}
-
 /**
  * Check if the source wallet is involved in the transaction in any way:
  * feePayer, token transfers, native transfers, or swap events.
@@ -259,34 +203,4 @@ function isWalletInvolved(tx: HeliusEnhancedTx, wallet: string): boolean {
   if (tx.description?.includes(wallet)) return true;
 
   return false;
-}
-
-function parseSwapFallback(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSwap | null {
-  const nativeTransfers = tx.nativeTransfers ?? [];
-  const tokenTransfers = tx.tokenTransfers ?? [];
-
-  const solIn = nativeTransfers
-    .filter((t) => t.toUserAccount === sourceWallet)
-    .reduce((sum, t) => sum + t.amount, 0);
-
-  const solOut = nativeTransfers
-    .filter((t) => t.fromUserAccount === sourceWallet)
-    .reduce((sum, t) => sum + t.amount, 0);
-
-  const netSol = solIn - solOut;
-  const tokens = tokenTransfers.filter((t) => t.mint !== SOL_MINT);
-
-  if (tokens.length === 0 || netSol === 0) return null;
-
-  const tkn = tokens[0];
-  const direction: 'BUY' | 'SELL' = netSol > 0 ? 'SELL' : 'BUY';
-
-  return {
-    signature: tx.signature,
-    direction,
-    tokenMint: tkn.mint,
-    solAmount: lamportsToSol(Math.abs(netSol)),
-    tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
-    tokenDecimals: 6,
-  };
 }

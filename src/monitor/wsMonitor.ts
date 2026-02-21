@@ -5,58 +5,54 @@ import { handleParsedSwap, type ParsedSwap } from '../webhook/handler';
 import { logger } from '../utils/logger';
 
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+const POLL_INTERVAL_MS = 2_000;
 
-export function startWsMonitor(connection: Connection): void {
+const processing = new Set<string>();
+
+export function startPollingMonitor(connection: Connection): void {
   const config = getConfig();
   const sourceWallet = config.SOURCE_WALLET;
   const walletPubkey = new PublicKey(sourceWallet);
 
-  let subId: number;
-  let lastEventAt = Date.now();
+  logger.info({ sourceWallet, intervalMs: POLL_INTERVAL_MS }, 'Polling monitor started');
 
-  function subscribe() {
-    subId = connection.onLogs(
-      walletPubkey,
-      async (logs) => {
-        lastEventAt = Date.now();
-        if (logs.err) return;
+  async function poll() {
+    try {
+      const sigs = await connection.getSignaturesForAddress(walletPubkey, { limit: 5 });
 
-        const sig = logs.signature;
-        if (isEventProcessed(sig)) return;
+      for (const sigInfo of sigs) {
+        if (sigInfo.err) continue;
+        if (isEventProcessed(sigInfo.signature)) continue;
+        if (processing.has(sigInfo.signature)) continue;
+        processing.add(sigInfo.signature);
 
-        try {
-          const parsed = await parseSwapFromRpc(connection, sig, sourceWallet);
-          if (parsed) {
-            logger.info(
-              { source: 'ws', direction: parsed.direction, token: parsed.tokenMint, sol: parsed.solAmount, sig },
-              'WS: swap detected',
-            );
-            await handleParsedSwap(parsed);
-          }
-        } catch (err) {
-          logger.error({ err, sig }, 'WS: error processing transaction');
-        }
-      },
-      'confirmed',
-    );
-
-    logger.info({ subscriptionId: subId, sourceWallet }, 'WebSocket monitor active');
+        parseSwapFromRpc(connection, sigInfo.signature, sourceWallet)
+          .then(async (parsed) => {
+            if (parsed) {
+              logger.info(
+                { source: 'poll', direction: parsed.direction, token: parsed.tokenMint, sol: parsed.solAmount, sig: parsed.signature },
+                'Poll: swap detected',
+              );
+              await handleParsedSwap(parsed);
+            }
+          })
+          .catch((err) => {
+            logger.error({ err, sig: sigInfo.signature }, 'Poll: error processing tx');
+          })
+          .finally(() => {
+            processing.delete(sigInfo.signature);
+          });
+      }
+    } catch (err) {
+      logger.error({ err }, 'Poll: error fetching signatures');
+    }
   }
 
-  subscribe();
-
-  // Resubscribe if the WebSocket goes silent for too long (5 min)
-  setInterval(() => {
-    const silentMs = Date.now() - lastEventAt;
-    if (silentMs > 5 * 60 * 1000) {
-      logger.warn({ silentMs }, 'WS: no events in 5 min, resubscribing');
-      try { connection.removeOnLogsListener(subId); } catch { /* ignore */ }
-      subscribe();
-    }
-  }, 60_000);
+  setInterval(poll, POLL_INTERVAL_MS);
+  poll();
 }
 
-async function parseSwapFromRpc(
+export async function parseSwapFromRpc(
   connection: Connection,
   signature: string,
   sourceWallet: string,
@@ -74,7 +70,7 @@ async function parseSwapFromRpc(
   const walletIdx = accountKeys.indexOf(sourceWallet);
   if (walletIdx === -1) return null;
 
-  // Net SOL change for the source wallet (lamports, includes fees)
+  // Net SOL change (lamports) — the only reliable source of truth
   const netSolLamports = tx.meta.postBalances[walletIdx] - tx.meta.preBalances[walletIdx];
   if (netSolLamports === 0) return null;
 

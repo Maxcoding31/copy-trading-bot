@@ -4,7 +4,7 @@ import { loadConfig, getConfig } from './config';
 import { initDb, closeDb } from './db/sqlite';
 import { getKeypair, getSharedConnection } from './trade/solana';
 import { webhookRouter } from './webhook/handler';
-import { startWsMonitor } from './monitor/wsMonitor';
+import { startPollingMonitor } from './monitor/wsMonitor';
 import { notifyStartup, notifyError } from './notify/telegram';
 import {
   getVirtualPnL, getVirtualPortfolio, getDailySpent, getOpenPositionCount,
@@ -161,12 +161,12 @@ async function main(): Promise<void> {
     );
     notifyStartup(keypair.publicKey.toBase58(), config.DRY_RUN);
 
-    // Start WebSocket monitor for near-instant detection (~1-2s vs ~8s webhook)
+    // Start polling monitor for fast detection (~2-3s vs ~8s webhook)
     try {
       const connection = getSharedConnection();
-      startWsMonitor(connection);
+      startPollingMonitor(connection);
     } catch (err) {
-      logger.error({ err }, 'Failed to start WebSocket monitor, relying on webhook only');
+      logger.error({ err }, 'Failed to start polling monitor, relying on webhook only');
     }
   });
 
