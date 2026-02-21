@@ -257,123 +257,28 @@ function parseSwapFallback(tx: HeliusEnhancedTx, sourceWallet: string): ParsedSw
   const nativeTransfers = tx.nativeTransfers ?? [];
   const tokenTransfers = tx.tokenTransfers ?? [];
 
-  // SOL sent FROM the source wallet (to any destination)
-  const solOut = nativeTransfers
-    .filter((t) => t.fromUserAccount === sourceWallet)
-    .reduce((sum, t) => sum + t.amount, 0);
-
-  // SOL received BY the source wallet (from any source)
   const solIn = nativeTransfers
     .filter((t) => t.toUserAccount === sourceWallet)
     .reduce((sum, t) => sum + t.amount, 0);
 
-  // Non-SOL tokens received/sent by source wallet (strict match)
-  const tokensReceived = tokenTransfers.filter(
-    (t) => t.toUserAccount === sourceWallet && t.mint !== SOL_MINT,
-  );
-  const tokensSent = tokenTransfers.filter(
-    (t) => t.fromUserAccount === sourceWallet && t.mint !== SOL_MINT,
-  );
-
-  // ── Strict matching (fromUserAccount / toUserAccount === sourceWallet) ──
-
-  // BUY: SOL goes out, tokens come in
-  if (solOut > 0 && tokensReceived.length > 0 && tokensSent.length === 0) {
-    const tkn = tokensReceived[0];
-    return {
-      signature: tx.signature,
-      direction: 'BUY',
-      tokenMint: tkn.mint,
-      solAmount: lamportsToSol(solOut),
-      tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
-      tokenDecimals: 6,
-    };
-  }
-
-  // SELL: tokens go out, SOL comes in
-  if (solIn > 0 && tokensSent.length > 0 && tokensReceived.length === 0) {
-    const tkn = tokensSent[0];
-    return {
-      signature: tx.signature,
-      direction: 'SELL',
-      tokenMint: tkn.mint,
-      solAmount: lamportsToSol(solIn),
-      tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
-      tokenDecimals: 6,
-    };
-  }
-
-  // SELL variant: tokens go out, SOL comes in, but also some tokens received
-  if (solIn > 0 && tokensSent.length > 0) {
-    const netSol = solIn - solOut;
-    if (netSol > 0) {
-      const tkn = tokensSent[0];
-      return {
-        signature: tx.signature,
-        direction: 'SELL',
-        tokenMint: tkn.mint,
-        solAmount: lamportsToSol(netSol),
-        tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
-        tokenDecimals: 6,
-      };
-    }
-  }
-
-  // BUY variant: SOL goes out, tokens come in, but with net SOL outflow
-  if (solOut > 0 && tokensReceived.length > 0) {
-    const netSol = solOut - solIn;
-    if (netSol > 0) {
-      const tkn = tokensReceived[0];
-      return {
-        signature: tx.signature,
-        direction: 'BUY',
-        tokenMint: tkn.mint,
-        solAmount: lamportsToSol(netSol),
-        tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
-        tokenDecimals: 6,
-      };
-    }
-  }
-
-  // ── Broad fallback (for platforms like Pump.fun where token transfer  ──
-  // ── fromUserAccount may be a program account, not the source wallet)  ──
+  const solOut = nativeTransfers
+    .filter((t) => t.fromUserAccount === sourceWallet)
+    .reduce((sum, t) => sum + t.amount, 0);
 
   const netSol = solIn - solOut;
-  const allTokens = tokenTransfers.filter((t) => t.mint !== SOL_MINT);
+  const tokens = tokenTransfers.filter((t) => t.mint !== SOL_MINT);
 
-  if (allTokens.length > 0 && netSol !== 0) {
-    const tkn = allTokens[0];
+  if (tokens.length === 0 || netSol === 0) return null;
 
-    if (netSol > 0) {
-      // Net SOL flowing IN to the wallet + token transfers exist → SELL
-      logger.info(
-        { sig: tx.signature, netSolLamports: netSol, mint: tkn.mint, tokenAmount: tkn.tokenAmount },
-        'Broad fallback: detected as SELL (net SOL inflow + token transfer)',
-      );
-      return {
-        signature: tx.signature,
-        direction: 'SELL',
-        tokenMint: tkn.mint,
-        solAmount: lamportsToSol(netSol),
-        tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
-        tokenDecimals: 6,
-      };
-    } else {
-      // Net SOL flowing OUT from the wallet + token transfers exist → BUY
-      logger.info(
-        { sig: tx.signature, netSolLamports: Math.abs(netSol), mint: tkn.mint, tokenAmount: tkn.tokenAmount },
-        'Broad fallback: detected as BUY (net SOL outflow + token transfer)',
-      );
-      return {
-        signature: tx.signature,
-        direction: 'BUY',
-        tokenMint: tkn.mint,
-        solAmount: lamportsToSol(Math.abs(netSol)),
-        tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
-        tokenDecimals: 6,
-      };
-    }
-  }
+  const tkn = tokens[0];
+  const direction: 'BUY' | 'SELL' = netSol > 0 ? 'SELL' : 'BUY';
 
-  return null;
+  return {
+    signature: tx.signature,
+    direction,
+    tokenMint: tkn.mint,
+    solAmount: lamportsToSol(Math.abs(netSol)),
+    tokenAmount: BigInt(Math.round(tkn.tokenAmount * 1e6)),
+    tokenDecimals: 6,
+  };
 }
