@@ -78,6 +78,28 @@
   /* Refresh indicator */
   .refresh { font-size: 11px; color: var(--text2); padding: 8px 24px; text-align: center; }
 
+  /* Settings panel */
+  .settings-toggle { background: none; border: 1px solid var(--border); color: var(--text2); padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 12px; transition: .15s; }
+  .settings-toggle:hover { border-color: var(--accent); color: var(--accent); }
+  .settings-panel { background: var(--surface); border-bottom: 1px solid var(--border); padding: 20px 24px; display: none; }
+  .settings-panel.open { display: block; }
+  .settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  @media (max-width: 700px) { .settings-row { grid-template-columns: 1fr; } }
+  .settings-field { display: flex; flex-direction: column; gap: 6px; }
+  .settings-field label { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: .5px; }
+  .settings-field input { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-size: 13px; font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace; outline: none; transition: .15s; }
+  .settings-field input:focus { border-color: var(--accent); }
+  .settings-field input::placeholder { color: var(--text2); opacity: .5; }
+  .settings-actions { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+  .checkbox-label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text2); cursor: pointer; }
+  .checkbox-label input { accent-color: var(--accent); }
+  .btn-save { background: var(--accent); color: #fff; border: none; padding: 10px 28px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: .15s; }
+  .btn-save:hover { opacity: .85; }
+  .btn-save:disabled { opacity: .4; cursor: not-allowed; }
+  .settings-status { margin-top: 12px; font-size: 12px; min-height: 18px; }
+  .status-ok { color: var(--green); }
+  .status-err { color: var(--red); }
+
   /* Scrollbar */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -94,7 +116,28 @@
   <div class="header-right">
     <span><span class="dot dot-green" id="statusDot"></span> <span id="uptimeText">--</span></span>
     <span>Ratio: <strong id="ratioText">--</strong></span>
+    <button class="settings-toggle" onclick="toggleSettings()">&#9881; Param&egrave;tres</button>
   </div>
+</div>
+
+<div class="settings-panel" id="settingsPanel">
+  <div class="settings-row">
+    <div class="settings-field">
+      <label>Wallet Source (adresse publique)</label>
+      <input type="text" id="inputSource" placeholder="Adresse du wallet source..." spellcheck="false" autocomplete="off">
+    </div>
+    <div class="settings-field">
+      <label>Bot Wallet (cl&eacute; priv&eacute;e base58)</label>
+      <input type="password" id="inputBotKey" placeholder="Nouvelle cl&eacute; priv&eacute;e base58..." spellcheck="false" autocomplete="off">
+    </div>
+  </div>
+  <div class="settings-actions">
+    <label class="checkbox-label">
+      <input type="checkbox" id="resetCheck"> R&eacute;initialiser l'historique (positions, trades, PnL)
+    </label>
+    <button class="btn-save" id="btnSave" onclick="saveSettings()">Sauvegarder</button>
+  </div>
+  <div class="settings-status" id="settingsStatus"></div>
 </div>
 
 <div class="cards">
@@ -342,6 +385,69 @@ async function refresh() {
     document.getElementById('refreshText').textContent = 'Erreur de connexion...';
     document.getElementById('statusDot').className = 'dot';
     document.getElementById('statusDot').style.background = 'var(--red)';
+  }
+}
+
+// ── Settings panel ──────────────────────────────
+
+function toggleSettings() {
+  const panel = document.getElementById('settingsPanel');
+  panel.classList.toggle('open');
+  if (panel.classList.contains('open') && !document.getElementById('inputSource').value) {
+    const srcEl = document.getElementById('sourceWallet');
+    if (srcEl.title) document.getElementById('inputSource').value = srcEl.title;
+  }
+}
+
+async function saveSettings() {
+  const btn = document.getElementById('btnSave');
+  const status = document.getElementById('settingsStatus');
+  const sourceVal = document.getElementById('inputSource').value.trim();
+  const keyVal = document.getElementById('inputBotKey').value.trim();
+  const resetVal = document.getElementById('resetCheck').checked;
+
+  if (!sourceVal && !keyVal && !resetVal) {
+    status.className = 'settings-status status-err';
+    status.textContent = 'Aucune modification.';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Sauvegarde...';
+  status.className = 'settings-status';
+  status.textContent = '';
+
+  try {
+    const body = {};
+    if (sourceVal) body.sourceWallet = sourceVal;
+    if (keyVal) body.botPrivateKeyBase58 = keyVal;
+    if (resetVal) body.resetHistory = true;
+
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Erreur serveur');
+
+    let msg = 'Sauvegard\u00e9 ! ';
+    if (data.sourceChanged) msg += 'Source: ' + SHORT_MINT(data.sourceWallet) + ' | Webhook + Polling red\u00e9marr\u00e9s. ';
+    if (data.botChanged) msg += 'Bot wallet mis \u00e0 jour: ' + SHORT_MINT(data.botWallet) + '. ';
+    if (data.historyReset) msg += 'Historique r\u00e9initialis\u00e9.';
+
+    status.className = 'settings-status status-ok';
+    status.textContent = msg;
+    document.getElementById('inputBotKey').value = '';
+    document.getElementById('resetCheck').checked = false;
+    refresh();
+  } catch (err) {
+    status.className = 'settings-status status-err';
+    status.textContent = 'Erreur: ' + err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sauvegarder';
   }
 }
 

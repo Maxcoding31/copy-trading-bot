@@ -33,3 +33,11 @@ export function closeDb(): void {
     logger.info('SQLite database closed');
   }
 }
+
+export function resetDb(): void {
+  closeDb();
+  const fs = require('fs');
+  if (fs.existsSync(DB_PATH)) fs.unlinkSync(DB_PATH);
+  initDb();
+  logger.info('Database reset complete');
+}

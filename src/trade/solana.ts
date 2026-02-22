@@ -32,6 +32,11 @@ function base58Decode(str: string): Uint8Array {
   return new Uint8Array(bytes.reverse());
 }
 
+export function reloadKeypair(): Keypair {
+  _keypair = null;
+  return getKeypair();
+}
+
 export function getKeypair(): Keypair {
   if (!_keypair) {
     const config = getConfig();

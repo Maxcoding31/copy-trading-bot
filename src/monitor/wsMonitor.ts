@@ -8,8 +8,19 @@ const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 const POLL_INTERVAL_MS = 2_000;
 
 const processing = new Set<string>();
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+export function stopPollingMonitor(): void {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+    logger.info('Polling monitor stopped');
+  }
+}
 
 export function startPollingMonitor(connection: Connection): void {
+  stopPollingMonitor();
+
   const config = getConfig();
   const sourceWallet = config.SOURCE_WALLET;
   const walletPubkey = new PublicKey(sourceWallet);
@@ -48,7 +59,7 @@ export function startPollingMonitor(connection: Connection): void {
     }
   }
 
-  setInterval(poll, POLL_INTERVAL_MS);
+  pollTimer = setInterval(poll, POLL_INTERVAL_MS);
   poll();
 }
 

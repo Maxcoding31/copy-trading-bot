@@ -78,6 +78,16 @@ export function getConfig(): Config {
   return _config;
 }
 
+export function reloadConfig(): Config {
+  const result = configSchema.safeParse(process.env);
+  if (!result.success) {
+    throw new Error(`Invalid configuration: ${JSON.stringify(result.error.flatten().fieldErrors)}`);
+  }
+  _config = result.data;
+  logger.info('Configuration reloaded');
+  return _config;
+}
+
 /** SOL mint address (native) */
 export const SOL_MINT = 'So11111111111111111111111111111111111111112';
 

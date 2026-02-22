@@ -1,10 +1,11 @@
 import express from 'express';
+import fs from 'fs';
 import path from 'path';
-import { loadConfig, getConfig } from './config';
-import { initDb, closeDb } from './db/sqlite';
-import { getKeypair, getSharedConnection } from './trade/solana';
+import { loadConfig, getConfig, reloadConfig } from './config';
+import { initDb, closeDb, resetDb } from './db/sqlite';
+import { getKeypair, reloadKeypair, getSharedConnection } from './trade/solana';
 import { webhookRouter } from './webhook/handler';
-import { startPollingMonitor } from './monitor/wsMonitor';
+import { startPollingMonitor, stopPollingMonitor } from './monitor/wsMonitor';
 import { notifyStartup, notifyError } from './notify/telegram';
 import {
   getVirtualPnL, getVirtualPortfolio, getDailySpent, getOpenPositionCount,
@@ -133,6 +134,84 @@ async function main(): Promise<void> {
       uptime: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // ── Settings API ─────────────────────────────────
+  app.post('/api/settings', async (req, res) => {
+    try {
+      const { sourceWallet: newSource, botPrivateKeyBase58: newKey, resetHistory } = req.body;
+      const oldConfig = getConfig();
+      const envPath = path.resolve(__dirname, '..', '.env');
+      let envContent = fs.readFileSync(envPath, 'utf-8');
+
+      let sourceChanged = false;
+      let botChanged = false;
+
+      if (newSource && newSource !== oldConfig.SOURCE_WALLET) {
+        envContent = envContent.replace(/^SOURCE_WALLET=.*/m, `SOURCE_WALLET=${newSource}`);
+        process.env.SOURCE_WALLET = newSource;
+        sourceChanged = true;
+      }
+
+      if (newKey && newKey !== oldConfig.BOT_PRIVATE_KEY_BASE58) {
+        envContent = envContent.replace(/^BOT_PRIVATE_KEY_BASE58=.*/m, `BOT_PRIVATE_KEY_BASE58=${newKey}`);
+        process.env.BOT_PRIVATE_KEY_BASE58 = newKey;
+        botChanged = true;
+      }
+
+      fs.writeFileSync(envPath, envContent);
+      const newConfig = reloadConfig();
+
+      if (botChanged) reloadKeypair();
+      if (resetHistory) resetDb();
+
+      if (sourceChanged) {
+        const heliusKey = newConfig.HELIUS_API_KEY;
+        const host = req.headers.host ?? `localhost:${newConfig.PORT}`;
+        const webhookUrl = `http://${host}/webhook/helius`;
+
+        const existing = await fetch(`https://api.helius.xyz/v0/webhooks?api-key=${heliusKey}`)
+          .then((r) => r.json()) as any[];
+        for (const wh of existing) {
+          await fetch(`https://api.helius.xyz/v0/webhooks/${wh.webhookID}?api-key=${heliusKey}`, { method: 'DELETE' });
+        }
+
+        const whRes = await fetch(`https://api.helius.xyz/v0/webhooks?api-key=${heliusKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            webhookURL: webhookUrl,
+            transactionTypes: ['SWAP', 'TRANSFER', 'UNKNOWN'],
+            accountAddresses: [newSource],
+            webhookType: 'enhanced',
+            txnStatus: 'success',
+          }),
+        });
+
+        if (!whRes.ok) {
+          const body = await whRes.text();
+          throw new Error(`Webhook registration failed: ${whRes.status} – ${body}`);
+        }
+
+        stopPollingMonitor();
+        startPollingMonitor(getSharedConnection());
+        logger.info({ sourceWallet: newSource }, 'Source wallet changed, webhook + polling restarted');
+      }
+
+      const kp = botChanged ? reloadKeypair() : getKeypair();
+
+      res.json({
+        ok: true,
+        sourceWallet: newConfig.SOURCE_WALLET,
+        botWallet: kp.publicKey.toBase58(),
+        sourceChanged,
+        botChanged,
+        historyReset: !!resetHistory,
+      });
+    } catch (err) {
+      logger.error({ err }, 'Failed to update settings');
+      res.status(500).json({ error: (err as Error).message });
+    }
   });
 
   app.use('/webhook', webhookRouter);
