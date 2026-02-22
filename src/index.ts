@@ -159,6 +159,55 @@ async function main(): Promise<void> {
     });
   });
 
+  // ── Daily Report API ─────────────────────────────
+  app.get('/api/report/:day', (_req, res) => {
+    const cfg = getConfig();
+    const raw = _req.params.day;
+    const day = raw === 'today' ? new Date().toISOString().slice(0, 10) : raw;
+
+    const summary = getDailySummary(day);
+    const comparison = getDailyComparisonMetrics(day);
+    const pnl = getVirtualPnL();
+    const cash = getVirtualCash();
+    const portfolio = getVirtualPortfolio();
+    const openPositions = getOpenPositionCount();
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      day,
+      mode: cfg.DRY_RUN ? 'SIMULATION' : 'LIVE',
+      config: {
+        sourceWallet: cfg.SOURCE_WALLET,
+        copyRatio: cfg.COPY_RATIO,
+        maxSolPerTrade: cfg.MAX_SOL_PER_TRADE,
+        slippageBps: cfg.SLIPPAGE_BPS,
+        priorityFeeLamports: cfg.PRIORITY_FEE_LAMPORTS,
+        dryRunAccurate: cfg.DRY_RUN_ACCURATE,
+        maxFeePct: cfg.MAX_FEE_PCT,
+        minSolReserve: cfg.MIN_SOL_RESERVE,
+      },
+      wallet: {
+        startingBalance: cfg.VIRTUAL_STARTING_BALANCE,
+        currentBalance: +(cfg.VIRTUAL_STARTING_BALANCE + pnl.pnl).toFixed(6),
+        virtualCash: +cash.toFixed(6),
+        totalInvested: +pnl.totalSpent.toFixed(6),
+        totalReceived: +pnl.totalReceived.toFixed(6),
+        pnl: +pnl.pnl.toFixed(6),
+        pnlPercent: +(pnl.pnl / cfg.VIRTUAL_STARTING_BALANCE * 100).toFixed(2),
+        openPositions,
+      },
+      dailySummary: summary,
+      comparisonMetrics: comparison,
+      positions: portfolio.map((p) => ({
+        mint: p.mint,
+        tokens: p.token_amount,
+        invested: +p.total_spent.toFixed(6),
+        received: +p.total_received.toFixed(6),
+        pnl: +(p.total_received - p.total_spent).toFixed(6),
+      })),
+    });
+  });
+
   // ── Settings API ─────────────────────────────────
   app.post('/api/settings', async (req, res) => {
     try {
