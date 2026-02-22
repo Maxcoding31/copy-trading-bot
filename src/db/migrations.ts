@@ -63,6 +63,11 @@ const MIGRATIONS: string[] = [
     pnl       REAL NOT NULL,
     timestamp TEXT NOT NULL DEFAULT (datetime('now'))
   );`,
+
+  `CREATE TABLE IF NOT EXISTS virtual_wallet (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    cash_sol REAL NOT NULL
+  );`,
 ];
 
 export function runMigrations(db: Database.Database): void {

@@ -13,12 +13,14 @@ import {
   getRecentSourceTrades, getRecentVirtualTrades,
   recordPnlSnapshot, getPnlHistory, getDailySummary,
   markEventProcessed,
+  initVirtualWallet, getVirtualCash, setVirtualCash,
 } from './db/repo';
 import { logger } from './utils/logger';
 
 async function main(): Promise<void> {
   const config = loadConfig();
   initDb();
+  initVirtualWallet(config.VIRTUAL_STARTING_BALANCE);
   const keypair = getKeypair();
 
   const app = express();
@@ -46,6 +48,7 @@ async function main(): Promise<void> {
     const portfolio = getVirtualPortfolio();
     const openPositions = getOpenPositionCount();
     const dailySpent = getDailySpent();
+    const virtualCash = getVirtualCash();
 
     res.json({
       status: 'ok',
@@ -80,6 +83,7 @@ async function main(): Promise<void> {
         totalInvested: +pnl.totalSpent.toFixed(6),
         totalReceived: +pnl.totalReceived.toFixed(6),
         netPnL: +pnl.pnl.toFixed(6),
+        virtualCash: +virtualCash.toFixed(6),
       },
       timestamp: new Date().toISOString(),
     });
@@ -95,11 +99,13 @@ async function main(): Promise<void> {
     const startingBalance = cfg.VIRTUAL_STARTING_BALANCE;
     const currentBalance = startingBalance + pnl.pnl;
     const pnlPercent = startingBalance > 0 ? (pnl.pnl / startingBalance) * 100 : 0;
+    const virtualCash = getVirtualCash();
 
     res.json({
       wallet: {
         startingBalance,
         currentBalance: +currentBalance.toFixed(6),
+        virtualCash: +virtualCash.toFixed(6),
         pnl: +pnl.pnl.toFixed(6),
         pnlPercent: +pnlPercent.toFixed(2),
         totalInvested: +pnl.totalSpent.toFixed(6),
@@ -171,7 +177,8 @@ async function main(): Promise<void> {
         botChanged = true;
       }
 
-      if (newBalance != null && Number(newBalance) > 0 && Number(newBalance) !== oldConfig.VIRTUAL_STARTING_BALANCE) {
+      const balanceChanged = newBalance != null && Number(newBalance) > 0 && Number(newBalance) !== oldConfig.VIRTUAL_STARTING_BALANCE;
+      if (balanceChanged) {
         envContent = envContent.replace(/^VIRTUAL_STARTING_BALANCE=.*/m, `VIRTUAL_STARTING_BALANCE=${newBalance}`);
         process.env.VIRTUAL_STARTING_BALANCE = String(newBalance);
       }
@@ -190,6 +197,7 @@ async function main(): Promise<void> {
         stopPollingMonitor();
         clearProcessing();
         resetDb();
+        initVirtualWallet(newConfig.VIRTUAL_STARTING_BALANCE);
 
         const conn = getSharedConnection();
         const wallet = newConfig.SOURCE_WALLET;
@@ -205,6 +213,11 @@ async function main(): Promise<void> {
 
         startPollingMonitor(conn);
         logger.info('History reset complete, polling monitor restarted');
+      } else if (balanceChanged) {
+        const delta = Number(newBalance) - oldConfig.VIRTUAL_STARTING_BALANCE;
+        const currentCash = getVirtualCash();
+        setVirtualCash(currentCash + delta);
+        logger.info({ oldBalance: oldConfig.VIRTUAL_STARTING_BALANCE, newBalance, newCash: currentCash + delta }, 'Virtual cash adjusted for new starting balance');
       }
 
       if (sourceChanged && !resetHistory) {
@@ -293,12 +306,11 @@ async function main(): Promise<void> {
     }
   });
 
-  // Periodic PNL snapshots (every 60s)
   setInterval(() => {
     try {
-      const cfg = getConfig();
       const pnl = getVirtualPnL();
-      recordPnlSnapshot(cfg.VIRTUAL_STARTING_BALANCE + pnl.pnl, pnl.pnl);
+      const cash = getVirtualCash();
+      recordPnlSnapshot(cash, pnl.pnl);
     } catch { /* non-critical */ }
   }, 60_000);
 

@@ -165,6 +165,11 @@
     <div class="card-sub">SOL</div>
   </div>
   <div class="card">
+    <div class="card-label">Cash Disponible</div>
+    <div class="card-value" id="virtualCash">--</div>
+    <div class="card-sub">SOL (hors positions)</div>
+  </div>
+  <div class="card">
     <div class="card-label">PnL</div>
     <div class="card-value" id="pnlValue">--</div>
     <div class="card-sub" id="pnlPercent">--</div>
@@ -514,6 +519,7 @@ async function refresh() {
 
     document.getElementById('startBalance').textContent = SOL(d.wallet.startingBalance);
     document.getElementById('currentBalance').textContent = SOL(d.wallet.currentBalance);
+    document.getElementById('virtualCash').textContent = SOL(d.wallet.virtualCash);
 
     const pnlEl = document.getElementById('pnlValue');
     const pnlPctEl = document.getElementById('pnlPercent');

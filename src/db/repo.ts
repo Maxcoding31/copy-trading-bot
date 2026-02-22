@@ -100,6 +100,33 @@ export function updateCooldown(mint: string): void {
     .run(mint);
 }
 
+// ── Virtual Wallet (explicit cash tracking) ───────
+
+export function initVirtualWallet(startingSol: number): void {
+  getDb()
+    .prepare('INSERT OR IGNORE INTO virtual_wallet (id, cash_sol) VALUES (1, ?)')
+    .run(startingSol);
+}
+
+export function getVirtualCash(): number {
+  const row = getDb()
+    .prepare('SELECT cash_sol FROM virtual_wallet WHERE id = 1')
+    .get() as { cash_sol: number } | undefined;
+  return row?.cash_sol ?? 0;
+}
+
+export function updateVirtualCash(deltaSol: number): void {
+  getDb()
+    .prepare('UPDATE virtual_wallet SET cash_sol = cash_sol + ? WHERE id = 1')
+    .run(deltaSol);
+}
+
+export function setVirtualCash(sol: number): void {
+  getDb()
+    .prepare('UPDATE virtual_wallet SET cash_sol = ? WHERE id = 1')
+    .run(sol);
+}
+
 // ── Virtual P&L Tracking (DRY_RUN) ────────────────
 
 export function recordVirtualTrade(
@@ -117,7 +144,6 @@ export function recordVirtualTrade(
     )
     .run(signature, direction, mint, solAmount, tokenAmount, tokenPrice);
 
-  // Update virtual portfolio
   if (direction === 'BUY') {
     getDb()
       .prepare(
@@ -132,6 +158,7 @@ export function recordVirtualTrade(
            updated_at = datetime('now')`,
       )
       .run(mint, tokenAmount, solAmount, solAmount);
+    updateVirtualCash(-solAmount);
   } else {
     getDb()
       .prepare(
@@ -142,6 +169,7 @@ export function recordVirtualTrade(
          WHERE mint = ?`,
       )
       .run(tokenAmount, solAmount, mint);
+    updateVirtualCash(solAmount);
   }
 }
 

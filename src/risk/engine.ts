@@ -1,11 +1,20 @@
 import { Connection, PublicKey } from '@solana/web3.js';
-import { getConfig, solToLamports, SOL_MINT } from '../config';
-import { getDailySpent, getLastTradeAt, getPosition, getOpenPositionCount } from '../db/repo';
+import { getConfig, solToLamports, lamportsToSol, SOL_MINT } from '../config';
+import { getDailySpent, getLastTradeAt, getPosition, getOpenPositionCount, getVirtualCash } from '../db/repo';
 import { checkTokenSafety } from './tokenSafety';
 import { getJupiterQuote, type JupiterQuote } from '../trade/jupiter';
 import { getSharedConnection } from '../trade/solana';
 import { logger } from '../utils/logger';
 import type { ParsedSwap } from '../webhook/handler';
+
+const BASE_TX_FEE_LAMPORTS = 5_000;
+const ATA_CREATION_LAMPORTS = 2_039_280;
+
+function estimateFeeSol(config: ReturnType<typeof getConfig>, isNewToken: boolean): number {
+  let fee = BASE_TX_FEE_LAMPORTS + config.PRIORITY_FEE_LAMPORTS;
+  if (isNewToken) fee += ATA_CREATION_LAMPORTS;
+  return lamportsToSol(fee);
+}
 
 export interface TradePlan {
   direction: 'BUY' | 'SELL';
@@ -69,6 +78,23 @@ async function evaluateBuy(swap: ParsedSwap, config: ReturnType<typeof getConfig
     }
   }
 
+  // Fee guard: reject if fees dominate the trade
+  const isNewToken = !getPosition(mint);
+  const estFee = estimateFeeSol(config, isNewToken);
+  const feePct = (estFee / mySol) * 100;
+  if (feePct > config.MAX_FEE_PCT) {
+    return reject(`Fee overhead ${feePct.toFixed(1)}% exceeds max ${config.MAX_FEE_PCT}% (fee ~${estFee.toFixed(5)} SOL on ${mySol.toFixed(4)} SOL trade)`);
+  }
+
+  // Virtual cash guard (DRY_RUN only)
+  if (config.DRY_RUN) {
+    const cash = getVirtualCash();
+    const totalNeeded = mySol + estFee + config.MIN_SOL_RESERVE;
+    if (totalNeeded > cash) {
+      return reject(`Insufficient virtual cash: need ${totalNeeded.toFixed(4)} SOL (swap ${mySol.toFixed(4)} + fee ${estFee.toFixed(5)} + reserve ${config.MIN_SOL_RESERVE}), have ${cash.toFixed(4)} SOL`);
+    }
+  }
+
   if (config.BLOCK_IF_MINT_AUTHORITY || config.BLOCK_IF_FREEZE_AUTHORITY) {
     const safety = await checkTokenSafety(connection, mint);
     if (!safety.safe) {
@@ -87,7 +113,7 @@ async function evaluateBuy(swap: ParsedSwap, config: ReturnType<typeof getConfig
     return reject(`Price impact ${priceImpactBps}bps exceeds max ${config.MAX_PRICE_IMPACT_BPS}bps`);
   }
 
-  logger.info({ mint, mySol, priceImpactBps, sourceSol, openPositions: openCount }, 'BUY risk check passed');
+  logger.info({ mint, mySol, priceImpactBps, estFee: estFee.toFixed(6), feePct: feePct.toFixed(1), sourceSol, openPositions: openCount }, 'BUY risk check passed');
 
   return {
     action: 'EXECUTE',

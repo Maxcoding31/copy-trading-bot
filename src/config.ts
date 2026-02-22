@@ -45,6 +45,11 @@ const configSchema = z.object({
 
   // Virtual simulation
   VIRTUAL_STARTING_BALANCE: z.coerce.number().gt(0).default(5),
+  DRY_RUN_ACCURATE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+
+  // Fee guards
+  MAX_FEE_PCT: z.coerce.number().gte(0).lte(100).default(5),
+  MIN_SOL_RESERVE: z.coerce.number().gte(0).default(0.005),
 
   // Kill switches
   PAUSE_TRADING: boolStr,
