@@ -11,9 +11,10 @@ import { notifyStartup, notifyError } from './notify/telegram';
 import {
   getVirtualPnL, getVirtualPortfolio, getDailySpent, getOpenPositionCount,
   getRecentSourceTrades, getRecentVirtualTrades,
-  recordPnlSnapshot, getPnlHistory, getDailySummary,
+  recordPnlSnapshot, getPnlHistory, getDailySummary, getDailyComparisonMetrics,
   markEventProcessed,
   initVirtualWallet, getVirtualCash, setVirtualCash,
+  cleanupOldEvents, cleanupOldSnapshots,
 } from './db/repo';
 import { logger } from './utils/logger';
 
@@ -152,6 +153,7 @@ async function main(): Promise<void> {
       botTrades: getRecentVirtualTrades(100),
       pnlHistory: getPnlHistory(24),
       dailySummary: getDailySummary(),
+      comparisonMetrics: getDailyComparisonMetrics(),
       uptime: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
     });
@@ -306,6 +308,14 @@ async function main(): Promise<void> {
       },
       'Copy-trading bot started',
     );
+
+    if (!config.DRY_RUN) {
+      logger.warn('========================================');
+      logger.warn('[LIVE MODE ACTIVE] Real transactions will be sent on-chain!');
+      logger.warn({ minReserve: config.MIN_SOL_RESERVE, maxFeePct: config.MAX_FEE_PCT }, 'Safety guards active');
+      logger.warn('========================================');
+    }
+
     notifyStartup(keypair.publicKey.toBase58(), config.DRY_RUN);
 
     try {
@@ -316,6 +326,7 @@ async function main(): Promise<void> {
     }
   });
 
+  // PnL snapshot every 60s
   setInterval(() => {
     try {
       const pnl = getVirtualPnL();
@@ -323,6 +334,17 @@ async function main(): Promise<void> {
       recordPnlSnapshot(cash, pnl.pnl);
     } catch { /* non-critical */ }
   }, 60_000);
+
+  // DB cleanup every 6 hours
+  setInterval(() => {
+    try {
+      const eventsDeleted = cleanupOldEvents(48);
+      const snapshotsDeleted = cleanupOldSnapshots(30);
+      if (eventsDeleted > 0 || snapshotsDeleted > 0) {
+        logger.info({ eventsDeleted, snapshotsDeleted }, '[DAILY] Database cleanup');
+      }
+    } catch { /* non-critical */ }
+  }, 6 * 60 * 60_000);
 
   const shutdown = (signal: string) => {
     logger.info({ signal }, 'Shutting down...');

@@ -8,7 +8,10 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "register-webhook": "tsx src/scripts/registerWebhook.ts",
-    "generate-wallet": "tsx src/scripts/generateWallet.ts"
+    "generate-wallet": "tsx src/scripts/generateWallet.ts",
+    "report:today": "tsx src/scripts/reportDaily.ts",
+    "report:day": "tsx src/scripts/reportDaily.ts",
+    "verify": "tsx src/scripts/verifyAudit.ts"
   },
   "engines": {
     "node": ">=18.0.0"

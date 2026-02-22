@@ -68,6 +68,22 @@ const MIGRATIONS: string[] = [
     id       INTEGER PRIMARY KEY CHECK (id = 1),
     cash_sol REAL NOT NULL
   );`,
+
+  `CREATE TABLE IF NOT EXISTS execution_comparisons (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    signature           TEXT NOT NULL,
+    direction           TEXT NOT NULL,
+    mint                TEXT NOT NULL,
+    quote_sol_lamports  INTEGER NOT NULL,
+    real_sol_delta      INTEGER NOT NULL,
+    real_fee_lamports   INTEGER NOT NULL,
+    quote_token         TEXT NOT NULL,
+    real_token_delta    TEXT NOT NULL,
+    sol_slippage_pct    REAL NOT NULL DEFAULT 0,
+    token_slippage_pct  REAL NOT NULL DEFAULT 0,
+    compute_units       INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+  );`,
 ];
 
 export function runMigrations(db: Database.Database): void {

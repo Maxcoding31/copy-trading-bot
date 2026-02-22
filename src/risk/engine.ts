@@ -3,7 +3,7 @@ import { getConfig, solToLamports, lamportsToSol, SOL_MINT } from '../config';
 import { getDailySpent, getLastTradeAt, getPosition, getOpenPositionCount, getVirtualCash } from '../db/repo';
 import { checkTokenSafety } from './tokenSafety';
 import { getJupiterQuote, type JupiterQuote } from '../trade/jupiter';
-import { getSharedConnection } from '../trade/solana';
+import { getSharedConnection, getKeypair } from '../trade/solana';
 import { logger } from '../utils/logger';
 import type { ParsedSwap } from '../webhook/handler';
 
@@ -86,12 +86,24 @@ async function evaluateBuy(swap: ParsedSwap, config: ReturnType<typeof getConfig
     return reject(`Fee overhead ${feePct.toFixed(1)}% exceeds max ${config.MAX_FEE_PCT}% (fee ~${estFee.toFixed(5)} SOL on ${mySol.toFixed(4)} SOL trade)`);
   }
 
-  // Virtual cash guard (DRY_RUN only)
+  // Balance guard
   if (config.DRY_RUN) {
     const cash = getVirtualCash();
     const totalNeeded = mySol + estFee + config.MIN_SOL_RESERVE;
     if (totalNeeded > cash) {
       return reject(`Insufficient virtual cash: need ${totalNeeded.toFixed(4)} SOL (swap ${mySol.toFixed(4)} + fee ${estFee.toFixed(5)} + reserve ${config.MIN_SOL_RESERVE}), have ${cash.toFixed(4)} SOL`);
+    }
+  } else {
+    try {
+      const kp = getKeypair();
+      const balance = await connection.getBalance(kp.publicKey);
+      const balanceSol = balance / 1e9;
+      const totalNeeded = mySol + estFee + config.MIN_SOL_RESERVE;
+      if (totalNeeded > balanceSol) {
+        return reject(`[LIVE] Insufficient wallet balance: need ${totalNeeded.toFixed(4)} SOL, have ${balanceSol.toFixed(4)} SOL`);
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to check wallet balance, proceeding');
     }
   }
 

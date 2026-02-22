@@ -283,6 +283,82 @@ export function getPnlHistory(hoursBack = 24): Array<{ balance: number; pnl: num
     .all(`-${hoursBack} hours`) as Array<{ balance: number; pnl: number; timestamp: string }>;
 }
 
+// ── Database Cleanup ──────────────────────────────
+
+export function cleanupOldEvents(keepHours = 48): number {
+  const result = getDb()
+    .prepare(`DELETE FROM processed_events WHERE received_at < datetime('now', ?)`)
+    .run(`-${keepHours} hours`);
+  return result.changes;
+}
+
+export function cleanupOldSnapshots(keepDays = 30): number {
+  const result = getDb()
+    .prepare(`DELETE FROM pnl_snapshots WHERE timestamp < datetime('now', ?)`)
+    .run(`-${keepDays} days`);
+  return result.changes;
+}
+
+// ── Execution Comparisons (LIVE mode) ─────────────
+
+export interface ComparisonRow {
+  signature: string;
+  direction: string;
+  mint: string;
+  quote_sol_lamports: number;
+  real_sol_delta: number;
+  real_fee_lamports: number;
+  quote_token: string;
+  real_token_delta: string;
+  sol_slippage_pct: number;
+  token_slippage_pct: number;
+  compute_units: number;
+  created_at: string;
+}
+
+export function recordComparison(row: Omit<ComparisonRow, 'created_at'>): void {
+  getDb()
+    .prepare(
+      `INSERT INTO execution_comparisons
+       (signature, direction, mint, quote_sol_lamports, real_sol_delta, real_fee_lamports,
+        quote_token, real_token_delta, sol_slippage_pct, token_slippage_pct, compute_units)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      row.signature, row.direction, row.mint,
+      row.quote_sol_lamports, row.real_sol_delta, row.real_fee_lamports,
+      row.quote_token, row.real_token_delta,
+      row.sol_slippage_pct, row.token_slippage_pct, row.compute_units,
+    );
+}
+
+export function getDailyComparisonMetrics(day?: string) {
+  const d = day ?? new Date().toISOString().slice(0, 10);
+  const rows = getDb()
+    .prepare(
+      `SELECT sol_slippage_pct, token_slippage_pct
+       FROM execution_comparisons WHERE DATE(created_at) = ?
+       ORDER BY ABS(sol_slippage_pct) ASC`,
+    )
+    .all(d) as Array<{ sol_slippage_pct: number; token_slippage_pct: number }>;
+
+  if (rows.length === 0) return null;
+
+  const absSol = rows.map((r) => Math.abs(r.sol_slippage_pct)).sort((a, b) => a - b);
+  const absToken = rows.map((r) => Math.abs(r.token_slippage_pct)).sort((a, b) => a - b);
+  const p95Idx = Math.min(Math.floor(rows.length * 0.95), rows.length - 1);
+
+  return {
+    count: rows.length,
+    avgSolSlippagePct: +(absSol.reduce((s, v) => s + v, 0) / absSol.length).toFixed(3),
+    p95SolSlippagePct: +absSol[p95Idx].toFixed(3),
+    maxSolSlippagePct: +absSol[absSol.length - 1].toFixed(3),
+    avgTokenSlippagePct: +(absToken.reduce((s, v) => s + v, 0) / absToken.length).toFixed(3),
+    p95TokenSlippagePct: +absToken[p95Idx].toFixed(3),
+    maxTokenSlippagePct: +absToken[absToken.length - 1].toFixed(3),
+  };
+}
+
 // ── Daily Summary ─────────────────────────────────
 
 export function getDailySummary(day?: string) {

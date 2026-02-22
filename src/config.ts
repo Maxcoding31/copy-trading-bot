@@ -51,6 +51,9 @@ const configSchema = z.object({
   MAX_FEE_PCT: z.coerce.number().gte(0).lte(100).default(5),
   MIN_SOL_RESERVE: z.coerce.number().gte(0).default(0.005),
 
+  // Slippage alert threshold (LIVE mode compareExecution)
+  COMPARE_ALERT_PCT: z.coerce.number().gte(0).default(3),
+
   // Kill switches
   PAUSE_TRADING: boolStr,
   DRY_RUN: boolStr,

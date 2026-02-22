@@ -1,7 +1,8 @@
 import { VersionedTransaction } from '@solana/web3.js';
 import { getConfig, lamportsToSol } from '../config';
 import { getKeypair, getSharedConnection } from './solana';
-import { addDailySpent, updateCooldown, recordVirtualTrade, getPosition } from '../db/repo';
+import { addDailySpent, updateCooldown, recordVirtualTrade, getPosition, recordComparison } from '../db/repo';
+import { notifyError } from '../notify/telegram';
 import { logger } from '../utils/logger';
 import type { TradePlan } from '../risk/engine';
 
@@ -380,6 +381,8 @@ async function compareExecution(
     ? ((realSolNet - quoteSolLamports) / quoteSolLamports) * 100
     : 0;
 
+  const cu = (tx.meta as any).computeUnitsConsumed ?? 0;
+
   logger.info(
     {
       sig: signature,
@@ -392,7 +395,7 @@ async function compareExecution(
       postToken: postToken.toString(),
       deltaToken: deltaToken.toString(),
       fee: lamportsToSol(tx.meta.fee).toFixed(6),
-      computeUnits: (tx.meta as any).computeUnitsConsumed ?? 'N/A',
+      computeUnits: cu,
       blockTime: tx.blockTime ? new Date(tx.blockTime * 1000).toISOString() : 'N/A',
       quoteSol: lamportsToSol(quoteSolLamports).toFixed(6),
       quoteToken: quoteTokenRaw.toString(),
@@ -401,4 +404,30 @@ async function compareExecution(
     },
     '[AUDIT] Sim vs Real comparison',
   );
+
+  try {
+    recordComparison({
+      signature,
+      direction: plan.direction,
+      mint: plan.mint,
+      quote_sol_lamports: quoteSolLamports,
+      real_sol_delta: deltaSol,
+      real_fee_lamports: tx.meta.fee,
+      quote_token: quoteTokenRaw.toString(),
+      real_token_delta: deltaToken.toString(),
+      sol_slippage_pct: +solSlippage.toFixed(3),
+      token_slippage_pct: +tokenSlippage.toFixed(3),
+      compute_units: cu,
+    });
+  } catch { /* non-critical */ }
+
+  const config = getConfig();
+  const absSlippage = Math.max(Math.abs(solSlippage), Math.abs(tokenSlippage));
+  if (absSlippage > config.COMPARE_ALERT_PCT) {
+    notifyError(
+      `[SLIPPAGE ALERT] ${plan.direction} ${plan.mint.slice(0, 8)}… — ` +
+      `SOL ${solSlippage.toFixed(2)}% / Token ${tokenSlippage.toFixed(2)}% ` +
+      `(seuil: ${config.COMPARE_ALERT_PCT}%)`,
+    );
+  }
 }
