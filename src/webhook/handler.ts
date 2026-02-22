@@ -177,9 +177,15 @@ export async function handleParsedSwap(parsed: ParsedSwap): Promise<void> {
       recordPnlSnapshot(cfg.VIRTUAL_STARTING_BALANCE + pnl.pnl, pnl.pnl);
     } catch { /* non-critical */ }
   } else {
-    updateSourceTradeAction(parsed.signature, 'FAILED', 0, result.error);
-    logger.error({ error: result.error, dir: plan.direction, mint: plan.mint }, 'Trade failed');
-    notifyError(`Trade failed for ${plan.mint}: ${result.error}`);
+    const isBalanceError = result.error?.includes('Insufficient virtual balance');
+    updateSourceTradeAction(parsed.signature, isBalanceError ? 'REJECTED' : 'FAILED', 0, result.error);
+    if (isBalanceError) {
+      logger.warn({ error: result.error, dir: plan.direction, mint: plan.mint }, 'Trade rejected (insufficient balance)');
+      notifyTradeRejected(parsed, result.error ?? 'Insufficient balance');
+    } else {
+      logger.error({ error: result.error, dir: plan.direction, mint: plan.mint }, 'Trade failed');
+      notifyError(`Trade failed for ${plan.mint}: ${result.error}`);
+    }
   }
 }
 

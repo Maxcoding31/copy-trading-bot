@@ -89,6 +89,10 @@ export async function parseSwapFromRpc(
   const netSolLamports = tx.meta.postBalances[walletIdx] - tx.meta.preBalances[walletIdx];
   if (netSolLamports === 0) return null;
 
+  // Filter out token-to-token swaps where SOL change is just network fees
+  const MIN_SOL_CHANGE_LAMPORTS = 50_000; // 0.00005 SOL
+  if (Math.abs(netSolLamports) < MIN_SOL_CHANGE_LAMPORTS) return null;
+
   // Token balance changes owned by source wallet (exclude wrapped SOL)
   const pre = tx.meta.preTokenBalances ?? [];
   const post = tx.meta.postTokenBalances ?? [];

@@ -1,15 +1,23 @@
 import { VersionedTransaction } from '@solana/web3.js';
 import { getConfig, SOL_MINT, lamportsToSol } from '../config';
 import { getKeypair, getSharedConnection } from './solana';
-import { addDailySpent, updateCooldown, recordVirtualTrade, getVirtualPnL } from '../db/repo';
+import { addDailySpent, updateCooldown, recordVirtualTrade, getVirtualPnL, getPosition } from '../db/repo';
 import { logger } from '../utils/logger';
 import type { TradePlan } from '../risk/engine';
 
 const JUPITER_API = 'https://api.jup.ag/swap/v1';
 
-// Aggressive retry for memecoins – every ms counts
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 300;
+
+// Realistic fee estimation for simulation accuracy
+const BASE_TX_FEE_LAMPORTS = 5_000;           // 0.000005 SOL
+const ATA_CREATION_LAMPORTS = 2_039_280;       // ~0.00204 SOL (rent-exempt minimum)
+const estimateTxFeeSol = (config: ReturnType<typeof getConfig>, isNewToken: boolean): number => {
+  let fee = BASE_TX_FEE_LAMPORTS + config.PRIORITY_FEE_LAMPORTS;
+  if (isNewToken) fee += ATA_CREATION_LAMPORTS;
+  return lamportsToSol(fee);
+};
 
 // ── Jupiter Quote ──────────────────────────────────
 
@@ -151,6 +159,9 @@ export async function executeSwap(plan: TradePlan): Promise<SwapResult> {
     if (plan.direction === 'BUY') addDailySpent(lamportsToSol(plan.amountRaw));
     updateCooldown(plan.mint);
 
+    // Compare actual execution vs quote estimate (sim vs real)
+    compareExecution(connection, txSignature, keypair.publicKey.toBase58(), plan, quote).catch(() => {});
+
     logger.info({ txSignature }, 'Transaction confirmed');
     return { success: true, txSignature, quoteOutAmount: quote.outAmount };
   } catch (err) {
@@ -159,9 +170,28 @@ export async function executeSwap(plan: TradePlan): Promise<SwapResult> {
 }
 
 function executeDryRun(plan: TradePlan, quote: JupiterQuote): SwapResult {
+  const config = getConfig();
+  const isNewToken = plan.direction === 'BUY' && !getPosition(plan.mint);
+  const txFee = estimateTxFeeSol(config, isNewToken);
+
+  // Virtual balance check — prevent simulated overspending
+  if (plan.direction === 'BUY') {
+    const pnlBefore = getVirtualPnL();
+    const virtualBalance = config.VIRTUAL_STARTING_BALANCE + pnlBefore.pnl;
+    const needed = lamportsToSol(plan.amountRaw) + txFee;
+    if (needed > virtualBalance) {
+      logger.warn(
+        { needed: needed.toFixed(6), available: virtualBalance.toFixed(6), mint: plan.mint },
+        '[DRY RUN] Insufficient virtual balance, skipping',
+      );
+      return { success: false, error: `Insufficient virtual balance: need ${needed.toFixed(4)} SOL, have ${virtualBalance.toFixed(4)}` };
+    }
+  }
+
+  // Include estimated fees in the SOL amounts for realistic PNL
   const solVal = plan.direction === 'BUY'
-    ? lamportsToSol(plan.amountRaw)
-    : lamportsToSol(BigInt(quote.outAmount));
+    ? lamportsToSol(plan.amountRaw) + txFee   // total cost = swap + fees
+    : lamportsToSol(BigInt(quote.outAmount)) - txFee; // net received = output - fees
 
   const tokenVal = plan.direction === 'BUY'
     ? quote.outAmount
@@ -172,7 +202,7 @@ function executeDryRun(plan: TradePlan, quote: JupiterQuote): SwapResult {
     : lamportsToSol(BigInt(quote.outAmount)) / (Number(plan.amountRaw) || 1);
 
   const sig = `DRY_${Date.now()}`;
-  recordVirtualTrade(sig, plan.direction, plan.mint, solVal, tokenVal, tokenPrice);
+  recordVirtualTrade(sig, plan.direction, plan.mint, Math.max(solVal, 0), tokenVal, tokenPrice);
 
   const pnl = getVirtualPnL();
 
@@ -182,13 +212,15 @@ function executeDryRun(plan: TradePlan, quote: JupiterQuote): SwapResult {
       direction: plan.direction,
       mint: plan.mint,
       solAmount: solVal.toFixed(6),
+      txFee: txFee.toFixed(6),
+      isNewToken,
       tokenAmount: tokenVal,
       priceImpact: quote.priceImpactPct,
       pnl: `${pnl.pnl >= 0 ? '+' : ''}${pnl.pnl.toFixed(4)} SOL`,
       spent: pnl.totalSpent.toFixed(4),
       received: pnl.totalReceived.toFixed(4),
     },
-    '[DRY RUN] Virtual trade executed',
+    '[DRY RUN] Virtual trade executed (fees included)',
   );
 
   if (plan.direction === 'BUY') addDailySpent(lamportsToSol(plan.amountRaw));
@@ -215,4 +247,47 @@ async function fetchWithRetry(url: string, init: RequestInit, retries = MAX_RETR
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// ── Sim vs Real Comparison ────────────────────────
+
+async function compareExecution(
+  connection: ReturnType<typeof getSharedConnection>,
+  signature: string,
+  botWallet: string,
+  plan: TradePlan,
+  quote: JupiterQuote,
+): Promise<void> {
+  await sleep(2000); // wait for finalization
+  const tx = await connection.getParsedTransaction(signature, {
+    maxSupportedTransactionVersion: 0,
+    commitment: 'confirmed',
+  });
+  if (!tx?.meta) return;
+
+  const keys = tx.transaction.message.accountKeys.map((k) => k.pubkey.toBase58());
+  const idx = keys.indexOf(botWallet);
+  if (idx === -1) return;
+
+  const realSolDelta = Math.abs(tx.meta.postBalances[idx] - tx.meta.preBalances[idx]);
+  const quoteSolAmount = plan.direction === 'BUY'
+    ? Number(plan.amountRaw)
+    : Number(quote.outAmount);
+
+  const errorAbs = lamportsToSol(Math.abs(realSolDelta - quoteSolAmount));
+  const errorPct = quoteSolAmount > 0 ? (Math.abs(realSolDelta - quoteSolAmount) / quoteSolAmount) * 100 : 0;
+
+  logger.info(
+    {
+      sig: signature,
+      direction: plan.direction,
+      mint: plan.mint,
+      quoteSol: lamportsToSol(quoteSolAmount).toFixed(6),
+      realSol: lamportsToSol(realSolDelta).toFixed(6),
+      errorAbs: errorAbs.toFixed(6),
+      errorPct: errorPct.toFixed(2) + '%',
+      realFee: lamportsToSol(tx.meta.fee).toFixed(6),
+    },
+    '[AUDIT] Sim vs Real comparison',
+  );
 }
