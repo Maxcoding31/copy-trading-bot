@@ -21,6 +21,16 @@ async function main(): Promise<void> {
   const config = loadConfig();
   initDb();
   initVirtualWallet(config.VIRTUAL_STARTING_BALANCE);
+
+  // Reconcile virtual cash with existing trades (one-time migration)
+  const startPnl = getVirtualPnL();
+  const expectedCash = config.VIRTUAL_STARTING_BALANCE + startPnl.pnl;
+  const actualCash = getVirtualCash();
+  if (Math.abs(expectedCash - actualCash) > 0.000001 && startPnl.totalSpent > 0) {
+    setVirtualCash(expectedCash);
+    logger.info({ expected: expectedCash.toFixed(6), was: actualCash.toFixed(6) }, 'Virtual wallet reconciled with existing trades');
+  }
+
   const keypair = getKeypair();
 
   const app = express();
