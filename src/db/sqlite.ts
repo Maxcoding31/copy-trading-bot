@@ -37,7 +37,10 @@ export function closeDb(): void {
 export function resetDb(): void {
   closeDb();
   const fs = require('fs');
-  if (fs.existsSync(DB_PATH)) fs.unlinkSync(DB_PATH);
+  for (const suffix of ['', '-wal', '-shm']) {
+    const file = DB_PATH + suffix;
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  }
   initDb();
   logger.info('Database reset complete');
 }

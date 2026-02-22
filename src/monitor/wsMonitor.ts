@@ -10,6 +10,10 @@ const POLL_INTERVAL_MS = 2_000;
 const processing = new Set<string>();
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
+export function clearProcessing(): void {
+  processing.clear();
+}
+
 export function stopPollingMonitor(): void {
   if (pollTimer) {
     clearInterval(pollTimer);

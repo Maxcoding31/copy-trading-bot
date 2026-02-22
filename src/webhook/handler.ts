@@ -1,6 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { getConfig } from '../config';
-import { isEventProcessed, markEventProcessed, recordSourceTrade, updateSourceTradeAction } from '../db/repo';
+import { isEventProcessed, markEventProcessed, recordSourceTrade, updateSourceTradeAction, getVirtualPnL, recordPnlSnapshot } from '../db/repo';
 import { evaluateRisk } from '../risk/engine';
 import { executeSwap } from '../trade/jupiter';
 import { updatePosition } from '../trade/position';
@@ -170,6 +170,12 @@ export async function handleParsedSwap(parsed: ParsedSwap): Promise<void> {
     updatePosition(plan, result.quoteOutAmount ?? plan.quote.outAmount);
     notifyTradeExecuted(parsed, plan, result.txSignature);
     logger.info({ sig: result.txSignature, dir: plan.direction, mint: plan.mint }, 'Trade executed');
+
+    try {
+      const cfg = getConfig();
+      const pnl = getVirtualPnL();
+      recordPnlSnapshot(cfg.VIRTUAL_STARTING_BALANCE + pnl.pnl, pnl.pnl);
+    } catch { /* non-critical */ }
   } else {
     updateSourceTradeAction(parsed.signature, 'FAILED', 0, result.error);
     logger.error({ error: result.error, dir: plan.direction, mint: plan.mint }, 'Trade failed');

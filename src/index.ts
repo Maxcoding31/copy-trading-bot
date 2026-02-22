@@ -1,15 +1,18 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import { PublicKey } from '@solana/web3.js';
 import { loadConfig, getConfig, reloadConfig } from './config';
 import { initDb, closeDb, resetDb } from './db/sqlite';
 import { getKeypair, reloadKeypair, getSharedConnection } from './trade/solana';
 import { webhookRouter } from './webhook/handler';
-import { startPollingMonitor, stopPollingMonitor } from './monitor/wsMonitor';
+import { startPollingMonitor, stopPollingMonitor, clearProcessing } from './monitor/wsMonitor';
 import { notifyStartup, notifyError } from './notify/telegram';
 import {
   getVirtualPnL, getVirtualPortfolio, getDailySpent, getOpenPositionCount,
   getRecentSourceTrades, getRecentVirtualTrades,
+  recordPnlSnapshot, getPnlHistory, getDailySummary,
+  markEventProcessed,
 } from './db/repo';
 import { logger } from './utils/logger';
 
@@ -21,10 +24,8 @@ async function main(): Promise<void> {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
-  // Serve dashboard static files
   app.use(express.static(path.resolve(__dirname, '..', 'public')));
 
-  // Rate limiting on webhook endpoint
   let reqCount = 0;
   setInterval(() => { reqCount = 0; }, 60_000);
 
@@ -38,7 +39,6 @@ async function main(): Promise<void> {
     next();
   });
 
-  // Health + status endpoint – accessible from browser to monitor the bot
   app.get('/health', (_req, res) => {
     const cfg = getConfig();
     const kp = getKeypair();
@@ -85,7 +85,6 @@ async function main(): Promise<void> {
     });
   });
 
-  // Dashboard API – single endpoint with all data for the frontend
   app.get('/api/dashboard', (_req, res) => {
     const cfg = getConfig();
     const kp = getKeypair();
@@ -135,6 +134,8 @@ async function main(): Promise<void> {
       },
       sourceTrades: getRecentSourceTrades(100),
       botTrades: getRecentVirtualTrades(100),
+      pnlHistory: getPnlHistory(24),
+      dailySummary: getDailySummary(),
       uptime: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
     });
@@ -143,7 +144,14 @@ async function main(): Promise<void> {
   // ── Settings API ─────────────────────────────────
   app.post('/api/settings', async (req, res) => {
     try {
-      const { sourceWallet: newSource, botPrivateKeyBase58: newKey, resetHistory } = req.body;
+      const {
+        sourceWallet: newSource,
+        botPrivateKeyBase58: newKey,
+        resetHistory,
+        virtualBalance: newBalance,
+        copyRatio: newRatio,
+      } = req.body;
+
       const oldConfig = getConfig();
       const envPath = path.resolve(__dirname, '..', '.env');
       let envContent = fs.readFileSync(envPath, 'utf-8');
@@ -163,13 +171,43 @@ async function main(): Promise<void> {
         botChanged = true;
       }
 
+      if (newBalance != null && Number(newBalance) > 0 && Number(newBalance) !== oldConfig.VIRTUAL_STARTING_BALANCE) {
+        envContent = envContent.replace(/^VIRTUAL_STARTING_BALANCE=.*/m, `VIRTUAL_STARTING_BALANCE=${newBalance}`);
+        process.env.VIRTUAL_STARTING_BALANCE = String(newBalance);
+      }
+
+      if (newRatio != null && Number(newRatio) > 0 && Number(newRatio) <= 1 && Number(newRatio) !== oldConfig.COPY_RATIO) {
+        envContent = envContent.replace(/^COPY_RATIO=.*/m, `COPY_RATIO=${newRatio}`);
+        process.env.COPY_RATIO = String(newRatio);
+      }
+
       fs.writeFileSync(envPath, envContent);
       const newConfig = reloadConfig();
 
       if (botChanged) reloadKeypair();
-      if (resetHistory) resetDb();
 
-      if (sourceChanged) {
+      if (resetHistory) {
+        stopPollingMonitor();
+        clearProcessing();
+        resetDb();
+
+        const conn = getSharedConnection();
+        const wallet = newConfig.SOURCE_WALLET;
+        try {
+          const recentSigs = await conn.getSignaturesForAddress(new PublicKey(wallet), { limit: 20 });
+          for (const s of recentSigs) {
+            markEventProcessed(s.signature);
+          }
+          logger.info({ count: recentSigs.length }, 'Pre-populated processed_events after reset');
+        } catch (e) {
+          logger.warn({ err: e }, 'Failed to pre-populate processed_events');
+        }
+
+        startPollingMonitor(conn);
+        logger.info('History reset complete, polling monitor restarted');
+      }
+
+      if (sourceChanged && !resetHistory) {
         const heliusKey = newConfig.HELIUS_API_KEY;
         const host = req.headers.host ?? `localhost:${newConfig.PORT}`;
         const webhookUrl = `http://${host}/webhook/helius`;
@@ -186,7 +224,7 @@ async function main(): Promise<void> {
           body: JSON.stringify({
             webhookURL: webhookUrl,
             transactionTypes: ['SWAP', 'TRANSFER', 'UNKNOWN'],
-            accountAddresses: [newSource],
+            accountAddresses: [newConfig.SOURCE_WALLET],
             webhookType: 'enhanced',
             txnStatus: 'success',
           }),
@@ -198,8 +236,9 @@ async function main(): Promise<void> {
         }
 
         stopPollingMonitor();
+        clearProcessing();
         startPollingMonitor(getSharedConnection());
-        logger.info({ sourceWallet: newSource }, 'Source wallet changed, webhook + polling restarted');
+        logger.info({ sourceWallet: newConfig.SOURCE_WALLET }, 'Source wallet changed, webhook + polling restarted');
       }
 
       const kp = botChanged ? reloadKeypair() : getKeypair();
@@ -211,6 +250,8 @@ async function main(): Promise<void> {
         sourceChanged,
         botChanged,
         historyReset: !!resetHistory,
+        virtualBalance: newConfig.VIRTUAL_STARTING_BALANCE,
+        copyRatio: newConfig.COPY_RATIO,
       });
     } catch (err) {
       logger.error({ err }, 'Failed to update settings');
@@ -244,7 +285,6 @@ async function main(): Promise<void> {
     );
     notifyStartup(keypair.publicKey.toBase58(), config.DRY_RUN);
 
-    // Start polling monitor for fast detection (~2-3s vs ~8s webhook)
     try {
       const connection = getSharedConnection();
       startPollingMonitor(connection);
@@ -252,6 +292,15 @@ async function main(): Promise<void> {
       logger.error({ err }, 'Failed to start polling monitor, relying on webhook only');
     }
   });
+
+  // Periodic PNL snapshots (every 60s)
+  setInterval(() => {
+    try {
+      const cfg = getConfig();
+      const pnl = getVirtualPnL();
+      recordPnlSnapshot(cfg.VIRTUAL_STARTING_BALANCE + pnl.pnl, pnl.pnl);
+    } catch { /* non-critical */ }
+  }, 60_000);
 
   const shutdown = (signal: string) => {
     logger.info({ signal }, 'Shutting down...');

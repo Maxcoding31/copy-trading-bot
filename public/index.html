@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Copy-Trading Bot — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   :root {
     --bg: #0d1117; --surface: #161b22; --border: #30363d;
@@ -14,7 +15,6 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; }
 
-  /* Header */
   .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
   .header-left { display: flex; align-items: center; gap: 16px; }
   .header h1 { font-size: 18px; font-weight: 600; }
@@ -22,14 +22,12 @@
   .badge-sim { background: rgba(210,153,34,.2); color: var(--yellow); }
   .badge-live { background: var(--green-bg); color: var(--green); }
   .badge-paused { background: var(--red-bg); color: var(--red); }
-  .header-right { display: flex; gap: 16px; font-size: 12px; color: var(--text2); }
+  .header-right { display: flex; gap: 16px; font-size: 12px; color: var(--text2); align-items: center; }
   .header-right span { display: flex; align-items: center; gap: 4px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
   .dot-green { background: var(--green); }
-  .dot-yellow { background: var(--yellow); }
 
-  /* Cards row */
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; padding: 20px 24px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; padding: 20px 24px; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
   .card-label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
   .card-value { font-size: 28px; font-weight: 700; line-height: 1.2; }
@@ -37,12 +35,10 @@
   .positive { color: var(--green); }
   .negative { color: var(--red); }
 
-  /* Config bar */
   .config-bar { display: flex; gap: 24px; padding: 0 24px 16px; flex-wrap: wrap; }
   .config-item { font-size: 12px; color: var(--text2); }
   .config-item strong { color: var(--text); font-weight: 500; }
 
-  /* Sections */
   .sections { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 24px 24px; }
   @media (max-width: 900px) { .sections { grid-template-columns: 1fr; } }
 
@@ -51,7 +47,9 @@
   .section-header h2 { font-size: 14px; font-weight: 600; }
   .section-count { font-size: 11px; color: var(--text2); background: var(--bg); padding: 2px 8px; border-radius: 8px; }
 
-  /* Tables */
+  .full-width { grid-column: 1 / -1; }
+  .pad-24 { padding: 0 24px 24px; }
+
   .table-wrap { overflow-x: auto; max-height: 400px; overflow-y: auto; }
   table { width: 100%; border-collapse: collapse; }
   th { position: sticky; top: 0; background: var(--surface); text-align: left; font-size: 11px; color: var(--text2); text-transform: uppercase; padding: 10px 14px; border-bottom: 1px solid var(--border); }
@@ -72,10 +70,6 @@
   .empty-state { padding: 40px; text-align: center; color: var(--text2); }
   .empty-state .icon { font-size: 32px; margin-bottom: 8px; }
 
-  /* Positions full width */
-  .positions-section { grid-column: 1 / -1; }
-
-  /* Refresh indicator */
   .refresh { font-size: 11px; color: var(--text2); padding: 8px 24px; text-align: center; }
 
   /* Settings panel */
@@ -100,7 +94,16 @@
   .status-ok { color: var(--green); }
   .status-err { color: var(--red); }
 
-  /* Scrollbar */
+  /* Chart */
+  .chart-container { position: relative; height: 220px; padding: 16px; }
+
+  /* Daily summary cards */
+  .daily-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; padding: 16px; }
+  .daily-card { background: var(--bg); border-radius: 8px; padding: 14px; text-align: center; }
+  .daily-label { font-size: 11px; color: var(--text2); text-transform: uppercase; margin-bottom: 6px; }
+  .daily-val { font-size: 22px; font-weight: 700; }
+  .daily-sub { font-size: 11px; color: var(--text2); margin-top: 4px; }
+
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -124,11 +127,21 @@
   <div class="settings-row">
     <div class="settings-field">
       <label>Wallet Source (adresse publique)</label>
-      <input type="text" id="inputSource" placeholder="Adresse du wallet source..." spellcheck="false" autocomplete="off">
+      <input type="text" id="inputSource" placeholder="Adresse du wallet &agrave; tracker..." spellcheck="false" autocomplete="off">
     </div>
     <div class="settings-field">
       <label>Bot Wallet (cl&eacute; priv&eacute;e base58)</label>
       <input type="password" id="inputBotKey" placeholder="Nouvelle cl&eacute; priv&eacute;e base58..." spellcheck="false" autocomplete="off">
+    </div>
+  </div>
+  <div class="settings-row">
+    <div class="settings-field">
+      <label>Solde initial simulation (SOL)</label>
+      <input type="number" id="inputBalance" step="0.1" min="0.1" placeholder="ex: 5">
+    </div>
+    <div class="settings-field">
+      <label>Ratio de copie (0.01 &agrave; 1.00)</label>
+      <input type="number" id="inputRatio" step="0.01" min="0.01" max="1" placeholder="ex: 0.25">
     </div>
   </div>
   <div class="settings-actions">
@@ -175,46 +188,89 @@
   <div class="config-item">Slippage: <strong id="slippage">--</strong></div>
 </div>
 
+<!-- PNL Chart -->
+<div class="pad-24">
+  <div class="section full-width">
+    <div class="section-header">
+      <h2>PnL en temps r&eacute;el (24h)</h2>
+      <span class="section-count" id="chartPoints">0 pts</span>
+    </div>
+    <div class="chart-container">
+      <canvas id="pnlCanvas"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- Daily Summary -->
+<div class="pad-24">
+  <div class="section full-width">
+    <div class="section-header">
+      <h2>Bilan du Jour</h2>
+      <span class="section-count" id="dailyDate">--</span>
+    </div>
+    <div class="daily-grid" id="dailyGrid">
+      <div class="daily-card">
+        <div class="daily-label">PnL Net</div>
+        <div class="daily-val" id="dPnl">--</div>
+        <div class="daily-sub">SOL</div>
+      </div>
+      <div class="daily-card">
+        <div class="daily-label">Trades</div>
+        <div class="daily-val" id="dTrades">--</div>
+        <div class="daily-sub" id="dTradesSub">--</div>
+      </div>
+      <div class="daily-card">
+        <div class="daily-label">Volume Achat</div>
+        <div class="daily-val" id="dBuyVol">--</div>
+        <div class="daily-sub">SOL</div>
+      </div>
+      <div class="daily-card">
+        <div class="daily-label">Volume Vente</div>
+        <div class="daily-val" id="dSellVol">--</div>
+        <div class="daily-sub">SOL</div>
+      </div>
+      <div class="daily-card">
+        <div class="daily-label">Win Rate</div>
+        <div class="daily-val" id="dWinRate">--</div>
+        <div class="daily-sub" id="dWinSub">--</div>
+      </div>
+      <div class="daily-card">
+        <div class="daily-label">Meilleur Trade</div>
+        <div class="daily-val" id="dBest">--</div>
+        <div class="daily-sub" id="dBestMint">--</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="sections">
-  <!-- Source wallet trades -->
   <div class="section">
     <div class="section-header">
       <h2>Trades Source (wallet track&eacute;)</h2>
       <span class="section-count" id="sourceCount">0</span>
     </div>
     <div class="table-wrap" id="sourceTableWrap">
-      <div class="empty-state">
-        <div class="icon">&#128225;</div>
-        En attente de trades du wallet source...
-      </div>
+      <div class="empty-state"><div class="icon">&#128225;</div>En attente de trades du wallet source...</div>
     </div>
   </div>
 
-  <!-- Bot virtual trades -->
   <div class="section">
     <div class="section-header">
       <h2>Trades Bot (simulation)</h2>
       <span class="section-count" id="botCount">0</span>
     </div>
     <div class="table-wrap" id="botTableWrap">
-      <div class="empty-state">
-        <div class="icon">&#129302;</div>
-        En attente de trades simul&eacute;s...
-      </div>
+      <div class="empty-state"><div class="icon">&#129302;</div>En attente de trades simul&eacute;s...</div>
     </div>
   </div>
 
-  <!-- Open positions (full width) -->
-  <div class="section positions-section">
+  <div class="section full-width">
     <div class="section-header">
       <h2>Positions Ouvertes</h2>
       <span class="section-count" id="posCount">0</span>
     </div>
     <div class="table-wrap" id="posTableWrap">
-      <div class="empty-state">
-        <div class="icon">&#128202;</div>
-        Aucune position ouverte
-      </div>
+      <div class="empty-state"><div class="icon">&#128202;</div>Aucune position ouverte</div>
     </div>
   </div>
 </div>
@@ -223,7 +279,7 @@
 
 <script>
 const REFRESH_MS = 3000;
-const SHORT_MINT = (m) => m ? m.slice(0, 4) + '...' + m.slice(-4) : '??';
+const SHORT = (m) => m ? m.slice(0, 4) + '...' + m.slice(-4) : '??';
 const SOL = (v, d = 4) => v != null ? Number(v).toFixed(d) : '--';
 const SOLSCAN = (mint) => `https://solscan.io/token/${mint}`;
 const TIME = (iso) => {
@@ -252,10 +308,10 @@ function actionClass(a) {
 function actionLabel(a) {
   if (!a) return 'En cours...';
   const l = a.toUpperCase();
-  if (l === 'COPIED') return 'Copié';
-  if (l === 'REJECTED') return 'Rejeté';
-  if (l === 'FAILED') return 'Échoué';
-  if (l === 'DETECTED') return 'Détecté';
+  if (l === 'COPIED') return 'Copi\u00e9';
+  if (l === 'REJECTED') return 'Rejet\u00e9';
+  if (l === 'FAILED') return '\u00c9chou\u00e9';
+  if (l === 'DETECTED') return 'D\u00e9tect\u00e9';
   return a;
 }
 
@@ -277,7 +333,7 @@ function renderSourceTable(trades) {
     html += `<tr>
       <td>${TIME(t.created_at)}</td>
       <td class="${dirClass}">${dir}</td>
-      <td><a class="mint" href="${SOLSCAN(t.mint)}" target="_blank" title="${t.mint}">${SHORT_MINT(t.mint)}</a></td>
+      <td><a class="mint" href="${SOLSCAN(t.mint)}" target="_blank" title="${t.mint}">${SHORT(t.mint)}</a></td>
       <td>${SOL(t.sol_amount)}</td>
       <td class="${ac}">${al}</td>
       <td>${botSol}</td>
@@ -292,7 +348,7 @@ function renderBotTable(trades) {
   const el = document.getElementById('botTableWrap');
   document.getElementById('botCount').textContent = trades.length;
   if (!trades.length) {
-    el.innerHTML = '<div class="empty-state"><div class="icon">&#129302;</div>En attente de trades simulés...</div>';
+    el.innerHTML = '<div class="empty-state"><div class="icon">&#129302;</div>En attente de trades simul\u00e9s...</div>';
     return;
   }
   let html = '<table><thead><tr><th>Heure</th><th>Dir.</th><th>Token</th><th>SOL</th><th>Tokens</th></tr></thead><tbody>';
@@ -302,7 +358,7 @@ function renderBotTable(trades) {
     html += `<tr>
       <td>${TIME(t.created_at)}</td>
       <td class="${dirClass}">${dir}</td>
-      <td><a class="mint" href="${SOLSCAN(t.mint)}" target="_blank" title="${t.mint}">${SHORT_MINT(t.mint)}</a></td>
+      <td><a class="mint" href="${SOLSCAN(t.mint)}" target="_blank" title="${t.mint}">${SHORT(t.mint)}</a></td>
       <td>${SOL(t.sol_amount)}</td>
       <td style="font-size:11px;color:var(--text2)">${t.token_amount}</td>
     </tr>`;
@@ -319,12 +375,12 @@ function renderPositions(positions) {
     el.innerHTML = '<div class="empty-state"><div class="icon">&#128202;</div>Aucune position ouverte</div>';
     return;
   }
-  let html = '<table><thead><tr><th>Token</th><th>Investi</th><th>Reçu</th><th>PnL</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Token</th><th>Investi</th><th>Re\u00e7u</th><th>PnL</th></tr></thead><tbody>';
   for (const p of details) {
     const pnlClass = p.pnl >= 0 ? 'positive' : 'negative';
     const pnlSign = p.pnl >= 0 ? '+' : '';
     html += `<tr>
-      <td><a class="mint" href="${SOLSCAN(p.mint)}" target="_blank" title="${p.mint}">${SHORT_MINT(p.mint)}</a></td>
+      <td><a class="mint" href="${SOLSCAN(p.mint)}" target="_blank" title="${p.mint}">${SHORT(p.mint)}</a></td>
       <td>${SOL(p.invested)} SOL</td>
       <td>${SOL(p.received)} SOL</td>
       <td class="${pnlClass}">${pnlSign}${SOL(p.pnl)} SOL</td>
@@ -334,22 +390,128 @@ function renderPositions(positions) {
   el.innerHTML = html;
 }
 
+// ── PnL Chart ──────────────────────────────────────
+
+let pnlChart = null;
+
+function updatePnlChart(history) {
+  const ctx = document.getElementById('pnlCanvas');
+  document.getElementById('chartPoints').textContent = history.length + ' pts';
+
+  if (!history.length) {
+    if (pnlChart) { pnlChart.destroy(); pnlChart = null; }
+    return;
+  }
+
+  const labels = history.map(h => {
+    const d = new Date(h.timestamp.endsWith('Z') ? h.timestamp : h.timestamp + 'Z');
+    return d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  });
+  const data = history.map(h => h.pnl);
+  const lastPnl = data[data.length - 1] || 0;
+  const lineColor = lastPnl >= 0 ? '#3fb950' : '#f85149';
+  const fillColor = lastPnl >= 0 ? 'rgba(63,185,80,.1)' : 'rgba(248,81,73,.1)';
+
+  if (pnlChart) {
+    pnlChart.data.labels = labels;
+    pnlChart.data.datasets[0].data = data;
+    pnlChart.data.datasets[0].borderColor = lineColor;
+    pnlChart.data.datasets[0].backgroundColor = fillColor;
+    pnlChart.update('none');
+  } else {
+    pnlChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'PnL (SOL)',
+          data,
+          borderColor: lineColor,
+          backgroundColor: fillColor,
+          fill: true,
+          tension: 0.3,
+          pointRadius: 0,
+          borderWidth: 2,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { intersect: false, mode: 'index' },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#161b22',
+            borderColor: '#30363d',
+            borderWidth: 1,
+            titleColor: '#e6edf3',
+            bodyColor: '#8b949e',
+            callbacks: {
+              label: (ctx) => 'PnL: ' + (ctx.parsed.y >= 0 ? '+' : '') + ctx.parsed.y.toFixed(4) + ' SOL',
+            }
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#8b949e', maxTicksLimit: 10, font: { size: 10 } }, grid: { color: 'rgba(48,54,61,.4)' } },
+          y: {
+            ticks: { color: '#8b949e', font: { size: 10 }, callback: (v) => v.toFixed(3) },
+            grid: { color: 'rgba(48,54,61,.4)' },
+          },
+        },
+      },
+    });
+  }
+}
+
+// ── Daily Summary ──────────────────────────────────
+
+function updateDailySummary(ds) {
+  if (!ds) return;
+  document.getElementById('dailyDate').textContent = ds.day;
+
+  const pnlEl = document.getElementById('dPnl');
+  const sign = ds.netPnl >= 0 ? '+' : '';
+  pnlEl.textContent = sign + SOL(ds.netPnl);
+  pnlEl.className = 'daily-val ' + (ds.netPnl >= 0 ? 'positive' : 'negative');
+
+  document.getElementById('dTrades').textContent = ds.totalTrades;
+  document.getElementById('dTradesSub').textContent = ds.buys + ' achats / ' + ds.sells + ' ventes';
+  document.getElementById('dBuyVol').textContent = SOL(ds.totalBuyVolume);
+  document.getElementById('dSellVol').textContent = SOL(ds.totalSellVolume);
+
+  const wrEl = document.getElementById('dWinRate');
+  wrEl.textContent = ds.winRate + '%';
+  wrEl.className = 'daily-val ' + (ds.winRate >= 50 ? 'positive' : ds.winRate > 0 ? 'negative' : '');
+  document.getElementById('dWinSub').textContent = ds.winningPositions + ' gains / ' + ds.losingPositions + ' pertes';
+
+  const bestEl = document.getElementById('dBest');
+  const bestMintEl = document.getElementById('dBestMint');
+  if (ds.bestTrade) {
+    bestEl.textContent = '+' + SOL(ds.bestTrade.sol);
+    bestEl.className = 'daily-val positive';
+    bestMintEl.textContent = SHORT(ds.bestTrade.mint);
+  } else {
+    bestEl.textContent = '--';
+    bestEl.className = 'daily-val';
+    bestMintEl.textContent = 'Aucun';
+  }
+}
+
+// ── Refresh ────────────────────────────────────────
+
 async function refresh() {
   try {
     const res = await fetch('/api/dashboard');
     const d = await res.json();
 
-    // Mode badge
     const badge = document.getElementById('modeBadge');
     if (d.config.paused) { badge.textContent = 'EN PAUSE'; badge.className = 'badge badge-paused'; }
     else if (d.config.mode === 'SIMULATION') { badge.textContent = 'SIMULATION'; badge.className = 'badge badge-sim'; }
     else { badge.textContent = 'LIVE'; badge.className = 'badge badge-live'; }
 
-    // Header
     document.getElementById('uptimeText').textContent = 'Up ' + formatUptime(d.uptime);
     document.getElementById('ratioText').textContent = (d.config.copyRatio * 100) + '%';
 
-    // Cards
     document.getElementById('startBalance').textContent = SOL(d.wallet.startingBalance);
     document.getElementById('currentBalance').textContent = SOL(d.wallet.currentBalance);
 
@@ -367,20 +529,20 @@ async function refresh() {
     document.getElementById('dailySpent').textContent = SOL(d.budget.dailySpent);
     document.getElementById('dailyLimit').textContent = SOL(d.budget.remaining) + ' restant / ' + SOL(d.budget.dailyLimit);
 
-    // Config bar
-    document.getElementById('sourceWallet').textContent = SHORT_MINT(d.config.sourceWallet);
+    document.getElementById('sourceWallet').textContent = SHORT(d.config.sourceWallet);
     document.getElementById('sourceWallet').title = d.config.sourceWallet;
-    document.getElementById('botWallet').textContent = SHORT_MINT(d.config.botWallet);
+    document.getElementById('botWallet').textContent = SHORT(d.config.botWallet);
     document.getElementById('botWallet').title = d.config.botWallet;
     document.getElementById('maxTrade').textContent = d.config.maxSolPerTrade + ' SOL';
     document.getElementById('slippage').textContent = d.config.slippageBps + ' bps';
 
-    // Tables
     renderSourceTable(d.sourceTrades || []);
     renderBotTable(d.botTrades || []);
     renderPositions(d.positions);
+    updatePnlChart(d.pnlHistory || []);
+    updateDailySummary(d.dailySummary);
 
-    document.getElementById('refreshText').textContent = 'Dernière MAJ : ' + new Date().toLocaleTimeString('fr-FR');
+    document.getElementById('refreshText').textContent = 'Derni\u00e8re MAJ : ' + new Date().toLocaleTimeString('fr-FR');
   } catch (err) {
     document.getElementById('refreshText').textContent = 'Erreur de connexion...';
     document.getElementById('statusDot').className = 'dot';
@@ -388,14 +550,24 @@ async function refresh() {
   }
 }
 
-// ── Settings panel ──────────────────────────────
+// ── Settings panel ─────────────────────────────────
 
 function toggleSettings() {
   const panel = document.getElementById('settingsPanel');
   panel.classList.toggle('open');
-  if (panel.classList.contains('open') && !document.getElementById('inputSource').value) {
+  if (panel.classList.contains('open')) {
     const srcEl = document.getElementById('sourceWallet');
-    if (srcEl.title) document.getElementById('inputSource').value = srcEl.title;
+    if (srcEl.title && !document.getElementById('inputSource').value) {
+      document.getElementById('inputSource').value = srcEl.title;
+    }
+    const startBal = document.getElementById('startBalance').textContent;
+    if (startBal && startBal !== '--' && !document.getElementById('inputBalance').value) {
+      document.getElementById('inputBalance').value = parseFloat(startBal);
+    }
+    const ratio = document.getElementById('ratioText').textContent;
+    if (ratio && ratio !== '--' && !document.getElementById('inputRatio').value) {
+      document.getElementById('inputRatio').value = parseFloat(ratio) / 100;
+    }
   }
 }
 
@@ -405,8 +577,17 @@ async function saveSettings() {
   const sourceVal = document.getElementById('inputSource').value.trim();
   const keyVal = document.getElementById('inputBotKey').value.trim();
   const resetVal = document.getElementById('resetCheck').checked;
+  const balanceVal = document.getElementById('inputBalance').value.trim();
+  const ratioVal = document.getElementById('inputRatio').value.trim();
 
-  if (!sourceVal && !keyVal && !resetVal) {
+  const body = {};
+  if (sourceVal) body.sourceWallet = sourceVal;
+  if (keyVal) body.botPrivateKeyBase58 = keyVal;
+  if (resetVal) body.resetHistory = true;
+  if (balanceVal && parseFloat(balanceVal) > 0) body.virtualBalance = parseFloat(balanceVal);
+  if (ratioVal && parseFloat(ratioVal) > 0 && parseFloat(ratioVal) <= 1) body.copyRatio = parseFloat(ratioVal);
+
+  if (!Object.keys(body).length) {
     status.className = 'settings-status status-err';
     status.textContent = 'Aucune modification.';
     return;
@@ -418,11 +599,6 @@ async function saveSettings() {
   status.textContent = '';
 
   try {
-    const body = {};
-    if (sourceVal) body.sourceWallet = sourceVal;
-    if (keyVal) body.botPrivateKeyBase58 = keyVal;
-    if (resetVal) body.resetHistory = true;
-
     const res = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -433,12 +609,14 @@ async function saveSettings() {
     if (!res.ok) throw new Error(data.error || 'Erreur serveur');
 
     let msg = 'Sauvegard\u00e9 ! ';
-    if (data.sourceChanged) msg += 'Source: ' + SHORT_MINT(data.sourceWallet) + ' | Webhook + Polling red\u00e9marr\u00e9s. ';
-    if (data.botChanged) msg += 'Bot wallet mis \u00e0 jour: ' + SHORT_MINT(data.botWallet) + '. ';
-    if (data.historyReset) msg += 'Historique r\u00e9initialis\u00e9.';
+    if (data.sourceChanged) msg += 'Source: ' + SHORT(data.sourceWallet) + ' ';
+    if (data.botChanged) msg += 'Bot wallet mis \u00e0 jour ';
+    if (data.historyReset) msg += '| Historique r\u00e9initialis\u00e9 ';
+    if (data.virtualBalance) msg += '| Solde: ' + data.virtualBalance + ' SOL ';
+    if (data.copyRatio) msg += '| Ratio: ' + (data.copyRatio * 100) + '% ';
 
     status.className = 'settings-status status-ok';
-    status.textContent = msg;
+    status.textContent = msg.trim();
     document.getElementById('inputBotKey').value = '';
     document.getElementById('resetCheck').checked = false;
     refresh();

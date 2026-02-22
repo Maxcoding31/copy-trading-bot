@@ -56,6 +56,13 @@ const MIGRATIONS: string[] = [
     reject_reason  TEXT,
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
   );`,
+
+  `CREATE TABLE IF NOT EXISTS pnl_snapshots (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    balance   REAL NOT NULL,
+    pnl       REAL NOT NULL,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now'))
+  );`,
 ];
 
 export function runMigrations(db: Database.Database): void {

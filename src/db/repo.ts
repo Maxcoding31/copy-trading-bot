@@ -236,3 +236,78 @@ export function getRecentVirtualTrades(limit = 50) {
       created_at: string;
     }>;
 }
+
+// ── PnL Snapshots ─────────────────────────────────
+
+export function recordPnlSnapshot(balance: number, pnl: number): void {
+  getDb()
+    .prepare('INSERT INTO pnl_snapshots (balance, pnl) VALUES (?, ?)')
+    .run(balance, pnl);
+}
+
+export function getPnlHistory(hoursBack = 24): Array<{ balance: number; pnl: number; timestamp: string }> {
+  return getDb()
+    .prepare(
+      `SELECT balance, pnl, timestamp FROM pnl_snapshots
+       WHERE timestamp >= datetime('now', ?)
+       ORDER BY timestamp ASC`,
+    )
+    .all(`-${hoursBack} hours`) as Array<{ balance: number; pnl: number; timestamp: string }>;
+}
+
+// ── Daily Summary ─────────────────────────────────
+
+export function getDailySummary(day?: string) {
+  const d = day ?? new Date().toISOString().slice(0, 10);
+
+  const rows = getDb()
+    .prepare(
+      `SELECT direction, SUM(sol_amount) as total_sol, COUNT(*) as cnt
+       FROM virtual_trades WHERE DATE(created_at) = ?
+       GROUP BY direction`,
+    )
+    .all(d) as Array<{ direction: string; total_sol: number; cnt: number }>;
+
+  const buyRow = rows.find((r) => r.direction === 'BUY');
+  const sellRow = rows.find((r) => r.direction === 'SELL');
+
+  const totalBuys = buyRow?.cnt ?? 0;
+  const totalSells = sellRow?.cnt ?? 0;
+  const totalBuyVol = buyRow?.total_sol ?? 0;
+  const totalSellVol = sellRow?.total_sol ?? 0;
+
+  const portfolio = getDb()
+    .prepare('SELECT mint, total_spent, total_received FROM virtual_portfolio')
+    .all() as Array<{ mint: string; total_spent: number; total_received: number }>;
+
+  const winning = portfolio.filter((p) => p.total_received - p.total_spent > 0);
+  const losing = portfolio.filter((p) => p.total_received - p.total_spent < 0);
+
+  const bestTrade = getDb()
+    .prepare(
+      `SELECT mint, sol_amount FROM virtual_trades
+       WHERE DATE(created_at) = ? AND direction = 'SELL'
+       ORDER BY sol_amount DESC LIMIT 1`,
+    )
+    .get(d) as { mint: string; sol_amount: number } | undefined;
+
+  return {
+    day: d,
+    totalTrades: totalBuys + totalSells,
+    buys: totalBuys,
+    sells: totalSells,
+    totalBuyVolume: +totalBuyVol.toFixed(6),
+    totalSellVolume: +totalSellVol.toFixed(6),
+    netPnl: +(totalSellVol - totalBuyVol).toFixed(6),
+    winningPositions: winning.length,
+    losingPositions: losing.length,
+    winRate: portfolio.length > 0 ? +((winning.length / portfolio.length) * 100).toFixed(1) : 0,
+    bestTrade: bestTrade ? { mint: bestTrade.mint, sol: +bestTrade.sol_amount.toFixed(6) } : null,
+    positions: portfolio.map((p) => ({
+      mint: p.mint,
+      invested: +p.total_spent.toFixed(6),
+      received: +p.total_received.toFixed(6),
+      pnl: +(p.total_received - p.total_spent).toFixed(6),
+    })),
+  };
+}
