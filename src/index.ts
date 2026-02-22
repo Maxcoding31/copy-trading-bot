@@ -40,6 +40,8 @@ async function main(): Promise<void> {
 
   // Health + status endpoint – accessible from browser to monitor the bot
   app.get('/health', (_req, res) => {
+    const cfg = getConfig();
+    const kp = getKeypair();
     const pnl = getVirtualPnL();
     const portfolio = getVirtualPortfolio();
     const openPositions = getOpenPositionCount();
@@ -47,22 +49,22 @@ async function main(): Promise<void> {
 
     res.json({
       status: 'ok',
-      mode: config.DRY_RUN ? 'SIMULATION' : 'LIVE',
-      paused: config.PAUSE_TRADING,
+      mode: cfg.DRY_RUN ? 'SIMULATION' : 'LIVE',
+      paused: cfg.PAUSE_TRADING,
       uptime: Math.round(process.uptime()),
-      botWallet: keypair.publicKey.toBase58(),
-      sourceWallet: config.SOURCE_WALLET,
+      botWallet: kp.publicKey.toBase58(),
+      sourceWallet: cfg.SOURCE_WALLET,
       settings: {
-        copyRatio: config.COPY_RATIO,
-        maxSolPerTrade: config.MAX_SOL_PER_TRADE,
-        maxSolPerDay: config.MAX_SOL_PER_DAY,
-        maxOpenPositions: config.MAX_OPEN_POSITIONS,
-        slippageBps: config.SLIPPAGE_BPS,
+        copyRatio: cfg.COPY_RATIO,
+        maxSolPerTrade: cfg.MAX_SOL_PER_TRADE,
+        maxSolPerDay: cfg.MAX_SOL_PER_DAY,
+        maxOpenPositions: cfg.MAX_OPEN_POSITIONS,
+        slippageBps: cfg.SLIPPAGE_BPS,
       },
       budget: {
         dailySpent: +dailySpent.toFixed(6),
-        dailyLimit: config.MAX_SOL_PER_DAY,
-        remaining: +(config.MAX_SOL_PER_DAY - dailySpent).toFixed(6),
+        dailyLimit: cfg.MAX_SOL_PER_DAY,
+        remaining: +(cfg.MAX_SOL_PER_DAY - dailySpent).toFixed(6),
       },
       positions: {
         openCount: openPositions,
@@ -85,11 +87,13 @@ async function main(): Promise<void> {
 
   // Dashboard API – single endpoint with all data for the frontend
   app.get('/api/dashboard', (_req, res) => {
+    const cfg = getConfig();
+    const kp = getKeypair();
     const pnl = getVirtualPnL();
     const portfolio = getVirtualPortfolio();
     const openPositions = getOpenPositionCount();
     const dailySpent = getDailySpent();
-    const startingBalance = config.VIRTUAL_STARTING_BALANCE;
+    const startingBalance = cfg.VIRTUAL_STARTING_BALANCE;
     const currentBalance = startingBalance + pnl.pnl;
     const pnlPercent = startingBalance > 0 ? (pnl.pnl / startingBalance) * 100 : 0;
 
@@ -103,24 +107,24 @@ async function main(): Promise<void> {
         totalReceived: +pnl.totalReceived.toFixed(6),
       },
       config: {
-        mode: config.DRY_RUN ? 'SIMULATION' : 'LIVE',
-        paused: config.PAUSE_TRADING,
-        copyRatio: config.COPY_RATIO,
-        maxSolPerTrade: config.MAX_SOL_PER_TRADE,
-        maxSolPerDay: config.MAX_SOL_PER_DAY,
-        maxOpenPositions: config.MAX_OPEN_POSITIONS,
-        slippageBps: config.SLIPPAGE_BPS,
-        sourceWallet: config.SOURCE_WALLET,
-        botWallet: keypair.publicKey.toBase58(),
+        mode: cfg.DRY_RUN ? 'SIMULATION' : 'LIVE',
+        paused: cfg.PAUSE_TRADING,
+        copyRatio: cfg.COPY_RATIO,
+        maxSolPerTrade: cfg.MAX_SOL_PER_TRADE,
+        maxSolPerDay: cfg.MAX_SOL_PER_DAY,
+        maxOpenPositions: cfg.MAX_OPEN_POSITIONS,
+        slippageBps: cfg.SLIPPAGE_BPS,
+        sourceWallet: cfg.SOURCE_WALLET,
+        botWallet: kp.publicKey.toBase58(),
       },
       budget: {
         dailySpent: +dailySpent.toFixed(6),
-        dailyLimit: config.MAX_SOL_PER_DAY,
-        remaining: +(config.MAX_SOL_PER_DAY - dailySpent).toFixed(6),
+        dailyLimit: cfg.MAX_SOL_PER_DAY,
+        remaining: +(cfg.MAX_SOL_PER_DAY - dailySpent).toFixed(6),
       },
       positions: {
         openCount: openPositions,
-        maxPositions: config.MAX_OPEN_POSITIONS,
+        maxPositions: cfg.MAX_OPEN_POSITIONS,
         details: portfolio.map((p) => ({
           mint: p.mint,
           tokens: p.token_amount,
