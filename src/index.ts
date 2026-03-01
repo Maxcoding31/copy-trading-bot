@@ -331,7 +331,7 @@ async function main(): Promise<void> {
           logger.warn({ err: e }, 'Failed to pre-populate processed_events');
         }
 
-        startWebSocketMonitor(conn);
+        if (!newConfig.DISABLE_WEBSOCKET) startWebSocketMonitor(conn);
         startPollingMonitor(conn);
         logger.info('History reset complete, monitors restarted');
       } else if (balanceChanged) {
@@ -373,7 +373,7 @@ async function main(): Promise<void> {
         stopPollingMonitor();
         clearProcessing();
         const conn2 = getSharedConnection();
-        startWebSocketMonitor(conn2);
+        if (!newConfig.DISABLE_WEBSOCKET) startWebSocketMonitor(conn2);
         startPollingMonitor(conn2);
         logger.info({ sourceWallet: newConfig.SOURCE_WALLET }, 'Source wallet changed, webhook + monitors restarted');
       }
@@ -432,7 +432,7 @@ async function main(): Promise<void> {
 
     try {
       const connection = getSharedConnection();
-      startWebSocketMonitor(connection);
+      if (!config.DISABLE_WEBSOCKET) startWebSocketMonitor(connection);
       startPollingMonitor(connection);
     } catch (err) {
       logger.error({ err }, 'Failed to start monitors, relying on webhook only');

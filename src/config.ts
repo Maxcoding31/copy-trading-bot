@@ -93,6 +93,9 @@ const configSchema = z.object({
   // Max seconds to wait for SENT→CONFIRMED before rejecting SELL (0 = reject immediately)
   SELL_ON_SENT_TIMEOUT_SECONDS: z.coerce.number().int().gte(0).default(10),
 
+  // Disable WebSocket monitor (use when WS provider doesn't support logsSubscribe)
+  DISABLE_WEBSOCKET: boolStr.default('false'),
+
   // Kill switches
   PAUSE_TRADING: boolStr,
   DRY_RUN: boolStr,
