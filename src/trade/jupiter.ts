@@ -1,7 +1,7 @@
-import { VersionedTransaction } from '@solana/web3.js';
+import { VersionedTransaction, Connection } from '@solana/web3.js';
 import { getConfig, lamportsToSol } from '../config';
-import { getKeypair, getSharedConnection } from './solana';
-import { addDailySpent, updateCooldown, recordVirtualTrade, getPosition, recordComparison } from '../db/repo';
+import { getKeypair, getSharedConnection, getAllConnections } from './solana';
+import { addDailySpent, updateCooldown, recordVirtualTrade, getPosition, recordComparison, confirmPosition, failPosition } from '../db/repo';
 import { notifyError } from '../notify/telegram';
 import { logger } from '../utils/logger';
 import type { TradePlan } from '../risk/engine';
@@ -34,10 +34,22 @@ export async function getJupiterQuote(
     inputMint,
     outputMint,
     amount: amount.toString(),
-    slippageBps: config.SLIPPAGE_BPS.toString(),
-    onlyDirectRoutes: 'false',
     asLegacyTransaction: 'false',
+    maxAccounts: '64', // prevent "transaction too large" errors
   });
+
+  // RESTRICT_INTERMEDIATE_TOKENS=true filters illiquid routes but causes "no route"
+  // on many micro-caps — disabled by default to maximize coverage.
+  if (config.RESTRICT_INTERMEDIATE_TOKENS) {
+    params.set('restrictIntermediateTokens', 'true');
+  }
+
+  // P8: dynamic slippage lets Jupiter auto-adjust; otherwise use fixed BPS
+  if (config.USE_DYNAMIC_SLIPPAGE) {
+    params.set('dynamicSlippage', 'true');
+  } else {
+    params.set('slippageBps', config.SLIPPAGE_BPS.toString());
+  }
 
   const headers: Record<string, string> = { 'x-api-key': config.JUPITER_API_KEY };
 
@@ -92,6 +104,11 @@ export async function executeSwap(plan: TradePlan): Promise<SwapResult> {
     }
 
     // ── LIVE execution ──
+    // P10: dynamic priority fee
+    const priorityFeeLamports = config.USE_DYNAMIC_PRIORITY_FEE
+      ? await getDynamicPriorityFee(config.PRIORITY_FEE_LAMPORTS)
+      : config.PRIORITY_FEE_LAMPORTS;
+
     const swapRes = await fetchWithRetry(`${JUPITER_API}/swap`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': config.JUPITER_API_KEY },
@@ -102,7 +119,7 @@ export async function executeSwap(plan: TradePlan): Promise<SwapResult> {
         dynamicComputeUnitLimit: true,
         prioritizationFeeLamports: {
           priorityLevelWithMaxLamports: {
-            maxLamports: config.PRIORITY_FEE_LAMPORTS,
+            maxLamports: priorityFeeLamports,
             priorityLevel: 'veryHigh',
           },
         },
@@ -119,35 +136,30 @@ export async function executeSwap(plan: TradePlan): Promise<SwapResult> {
     const transaction = VersionedTransaction.deserialize(txBuf);
     transaction.sign([keypair]);
 
-    const connection = getSharedConnection();
     const rawTx = transaction.serialize();
+    const connection = getSharedConnection();
 
-    const txSignature = await connection.sendRawTransaction(rawTx, {
-      skipPreflight: true,
-      maxRetries: 3,
-    });
+    // P3: Send to all endpoints in parallel, take first success
+    const txSignature = await sendToMultipleEndpoints(rawTx);
 
-    logger.info({ txSignature }, 'Transaction sent, confirming...');
+    logger.info({ txSignature }, 'Transaction sent to RPC(s)');
 
-    const confirmation = await connection.confirmTransaction(
-      {
-        signature: txSignature,
-        blockhash: transaction.message.recentBlockhash,
-        lastValidBlockHeight: swapData.lastValidBlockHeight,
-      },
-      'confirmed',
+    // P6: Async confirmation — don't block the pipeline
+    // P7: Retry with new blockhash if needed
+    confirmAndRecordAsync(
+      connection,
+      txSignature,
+      transaction.message.recentBlockhash,
+      swapData.lastValidBlockHeight,
+      rawTx,
+      keypair,
+      plan,
+      quote,
     );
-
-    if (confirmation.value.err) {
-      return { success: false, error: `Tx failed: ${JSON.stringify(confirmation.value.err)}` };
-    }
 
     if (plan.direction === 'BUY') addDailySpent(lamportsToSol(plan.amountRaw));
     updateCooldown(plan.mint);
 
-    compareExecution(connection, txSignature, keypair.publicKey.toBase58(), plan, quote).catch(() => {});
-
-    logger.info({ txSignature }, 'Transaction confirmed');
     return { success: true, txSignature, quoteOutAmount: quote.outAmount };
   } catch (err) {
     return { success: false, error: `Swap error: ${(err as Error).message}` };
@@ -320,6 +332,165 @@ async function fetchWithRetry(url: string, init: RequestInit, retries = MAX_RETR
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// ── P3: Multi-endpoint send ───────────────────────
+
+async function sendToMultipleEndpoints(rawTx: Uint8Array): Promise<string> {
+  const connections = getAllConnections();
+
+  if (connections.length === 1) {
+    return connections[0].sendRawTransaction(rawTx, {
+      skipPreflight: true,
+      maxRetries: 3,
+    });
+  }
+
+  // Send to all endpoints in parallel, resolve with first success
+  const results = await Promise.allSettled(
+    connections.map((conn) =>
+      conn.sendRawTransaction(rawTx, { skipPreflight: true, maxRetries: 3 }),
+    ),
+  );
+
+  // Find first fulfilled result
+  for (const r of results) {
+    if (r.status === 'fulfilled') {
+      logger.info({ endpoints: connections.length }, 'Transaction sent to multiple endpoints');
+      return r.value;
+    }
+  }
+
+  // All failed — throw the first error
+  const firstErr = (results[0] as PromiseRejectedResult).reason;
+  throw firstErr;
+}
+
+// ── P6 + P7: Async confirmation with retry ────────
+
+async function confirmAndRecordAsync(
+  connection: Connection,
+  txSignature: string,
+  blockhash: string,
+  lastValidBlockHeight: number,
+  rawTx: Uint8Array,
+  keypair: ReturnType<typeof getKeypair>,
+  plan: TradePlan,
+  quote: JupiterQuote,
+): Promise<void> {
+  const MAX_CONFIRM_RETRIES = 2;
+
+  try {
+    for (let attempt = 0; attempt <= MAX_CONFIRM_RETRIES; attempt++) {
+      try {
+        const confirmation = await connection.confirmTransaction(
+          {
+            signature: txSignature,
+            blockhash,
+            lastValidBlockHeight,
+          },
+          'confirmed',
+        );
+
+        if (confirmation.value.err) {
+          logger.error({ err: confirmation.value.err, sig: txSignature }, 'Transaction failed on-chain');
+          notifyError(`Tx failed on-chain: ${txSignature} — ${JSON.stringify(confirmation.value.err)}`);
+          // A1: Rollback position if this was a BUY
+          if (plan.direction === 'BUY') {
+            try {
+              failPosition(plan.mint, BigInt(quote.outAmount));
+              logger.warn({ mint: plan.mint, sig: txSignature }, 'A1: Position rolled back (BUY failed on-chain)');
+            } catch (rbErr) {
+              logger.error({ err: rbErr, mint: plan.mint }, 'A1: Position rollback failed');
+            }
+          }
+          return;
+        }
+
+        logger.info({ txSignature, attempt }, 'Transaction confirmed (async)');
+        // A1: Promote position from SENT to CONFIRMED
+        if (plan.direction === 'BUY') {
+          try {
+            confirmPosition(plan.mint);
+            logger.info({ mint: plan.mint, sig: txSignature }, 'A1: Position confirmed (SENT → CONFIRMED)');
+          } catch (cfErr) {
+            logger.error({ err: cfErr, mint: plan.mint }, 'A1: Position confirmation failed');
+          }
+        }
+        break;
+      } catch (err) {
+        // P7: Blockhash expired — retry with new blockhash
+        const errMsg = (err as Error).message ?? '';
+        if (attempt < MAX_CONFIRM_RETRIES && errMsg.includes('block height exceeded')) {
+          logger.warn({ attempt, sig: txSignature }, 'Blockhash expired, retrying with new blockhash');
+
+          try {
+            const { blockhash: newBlockhash, lastValidBlockHeight: newHeight } =
+              await connection.getLatestBlockhash('confirmed');
+
+            const newTx = VersionedTransaction.deserialize(rawTx);
+            newTx.message.recentBlockhash = newBlockhash;
+            newTx.sign([keypair]);
+
+            const newRaw = newTx.serialize();
+            txSignature = await sendToMultipleEndpoints(newRaw);
+            blockhash = newBlockhash;
+            lastValidBlockHeight = newHeight;
+
+            logger.info({ newSig: txSignature }, 'Re-sent with new blockhash');
+          } catch (retryErr) {
+            logger.error({ err: retryErr }, 'Failed to retry with new blockhash');
+            return;
+          }
+        } else {
+          logger.error({ err, sig: txSignature }, 'Transaction confirmation failed');
+          // A1: On confirmation error (e.g. timeout), rollback BUY position
+          if (plan.direction === 'BUY') {
+            try {
+              failPosition(plan.mint, BigInt(quote.outAmount));
+              logger.warn({ mint: plan.mint, sig: txSignature }, 'A1: Position rolled back (confirmation error)');
+            } catch (rbErr) {
+              logger.error({ err: rbErr }, 'A1: Rollback failed on confirmation error');
+            }
+          }
+          return;
+        }
+      }
+    }
+
+    // Run comparison after confirmation
+    compareExecution(connection, txSignature, keypair.publicKey.toBase58(), plan, quote).catch(() => {});
+  } catch (err) {
+    logger.error({ err, sig: txSignature }, 'Async confirmation error');
+  }
+}
+
+// ── P10: Dynamic priority fee ─────────────────────
+
+async function getDynamicPriorityFee(maxLamports: number): Promise<number> {
+  try {
+    const connection = getSharedConnection();
+    const fees = await connection.getRecentPrioritizationFees();
+
+    if (fees.length === 0) return maxLamports;
+
+    // Use the median of recent fees as a baseline
+    const sorted = fees
+      .map((f) => f.prioritizationFee)
+      .sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+
+    // Cap at configured max
+    const fee = Math.min(median, maxLamports);
+    // Floor at 10k lamports to ensure we land
+    const result = Math.max(fee, 10_000);
+
+    logger.info({ dynamicFee: result, median, max: maxLamports }, 'Dynamic priority fee calculated');
+    return result;
+  } catch (err) {
+    logger.warn({ err: (err as Error).message }, 'Failed to get dynamic fee, using max');
+    return maxLamports;
+  }
 }
 
 // ── Sim vs Real Comparison (LIVE mode) ────────────

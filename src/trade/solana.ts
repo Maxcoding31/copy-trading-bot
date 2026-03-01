@@ -4,6 +4,7 @@ import { logger } from '../utils/logger';
 
 let _keypair: Keypair | null = null;
 let _connection: Connection | null = null;
+let _extraConnections: Connection[] | null = null;
 
 function base58Decode(str: string): Uint8Array {
   const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -61,4 +62,44 @@ export function getSharedConnection(): Connection {
     });
   }
   return _connection;
+}
+
+/** Extra RPC connections parsed from EXTRA_RPC_URLS (comma-separated) */
+export function getExtraConnections(): Connection[] {
+  if (!_extraConnections) {
+    const raw = getConfig().EXTRA_RPC_URLS;
+    _extraConnections = raw
+      .split(',')
+      .map((u) => u.trim())
+      .filter((u) => u.length > 0)
+      .map((url) => new Connection(url, { commitment: 'confirmed' }));
+    if (_extraConnections.length > 0) {
+      logger.info({ count: _extraConnections.length }, 'Extra RPC connections loaded');
+    }
+  }
+  return _extraConnections;
+}
+
+/** All connections: primary + extras (for multi-send) */
+export function getAllConnections(): Connection[] {
+  return [getSharedConnection(), ...getExtraConnections()];
+}
+
+/**
+ * Try an RPC call on primary connection, fallback to extras on error.
+ */
+export async function withFallbackConnection<T>(
+  fn: (conn: Connection) => Promise<T>,
+): Promise<T> {
+  const connections = getAllConnections();
+  let lastError: Error | null = null;
+  for (const conn of connections) {
+    try {
+      return await fn(conn);
+    } catch (err) {
+      lastError = err as Error;
+      logger.warn({ err: (err as Error).message }, 'RPC call failed, trying next endpoint');
+    }
+  }
+  throw lastError ?? new Error('All RPC endpoints failed');
 }

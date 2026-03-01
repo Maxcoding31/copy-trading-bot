@@ -11,7 +11,8 @@
     "generate-wallet": "tsx src/scripts/generateWallet.ts",
     "report:today": "tsx src/scripts/reportDaily.ts",
     "report:day": "tsx src/scripts/reportDaily.ts",
-    "verify": "tsx src/scripts/verifyAudit.ts"
+    "verify": "tsx src/scripts/verifyAudit.ts",
+    "health": "tsx src/scripts/health.ts"
   },
   "engines": {
     "node": ">=18.0.0"

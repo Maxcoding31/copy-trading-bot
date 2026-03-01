@@ -84,6 +84,36 @@ const MIGRATIONS: string[] = [
     compute_units       INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL DEFAULT (datetime('now'))
   );`,
+
+  // Instrumentation: trade pipeline latency + event tracking
+  `CREATE TABLE IF NOT EXISTS trade_pipeline_metrics (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    signature         TEXT NOT NULL,
+    direction         TEXT NOT NULL,
+    mint              TEXT NOT NULL,
+    source            TEXT NOT NULL DEFAULT 'unknown',
+    outcome           TEXT NOT NULL DEFAULT 'unknown',
+    reject_reason     TEXT,
+    sell_buffered     INTEGER NOT NULL DEFAULT 0,
+    sell_buffer_ms    INTEGER NOT NULL DEFAULT 0,
+    latency_risk_ms   INTEGER NOT NULL DEFAULT 0,
+    latency_exec_ms   INTEGER NOT NULL DEFAULT 0,
+    latency_total_ms  INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+  );`,
+];
+
+// ── Safe ALTER TABLE migrations ──────────────────
+// SQLite doesn't support "ADD COLUMN IF NOT EXISTS", so we try/catch each.
+const SAFE_ALTER_MIGRATIONS: string[] = [
+  // A1: Position state machine column
+  `ALTER TABLE positions ADD COLUMN status TEXT NOT NULL DEFAULT 'CONFIRMED'`,
+  // Price Drift Guard: observed drift percentage for BUY trades
+  `ALTER TABLE trade_pipeline_metrics ADD COLUMN price_drift_pct REAL`,
+  // A2: Unsafe parse flag per trade metric
+  `ALTER TABLE trade_pipeline_metrics ADD COLUMN unsafe_parse INTEGER NOT NULL DEFAULT 0`,
+  // A1: Milliseconds waited for SENT→CONFIRMED before processing a SELL
+  `ALTER TABLE trade_pipeline_metrics ADD COLUMN sell_on_sent_ms INTEGER NOT NULL DEFAULT 0`,
 ];
 
 export function runMigrations(db: Database.Database): void {
@@ -92,5 +122,15 @@ export function runMigrations(db: Database.Database): void {
       db.exec(sql);
     }
   })();
+
+  // Safe ALTER TABLE (idempotent — swallows "column already exists" errors)
+  for (const sql of SAFE_ALTER_MIGRATIONS) {
+    try {
+      db.exec(sql);
+    } catch {
+      // Column already exists — normal on subsequent starts
+    }
+  }
+
   logger.info('Database migrations applied');
 }

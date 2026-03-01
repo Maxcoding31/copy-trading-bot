@@ -1,18 +1,103 @@
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection, PublicKey, Logs } from '@solana/web3.js';
 import { getConfig, lamportsToSol } from '../config';
 import { isEventProcessed } from '../db/repo';
-import { handleParsedSwap, type ParsedSwap } from '../webhook/handler';
+import { handleParsedSwap, registerPendingBuy, type ParsedSwap } from '../webhook/handler';
 import { logger } from '../utils/logger';
 
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
-const POLL_INTERVAL_MS = 2_000;
+const POLL_INTERVAL_MS = 5_000; // P2: reduced role — fallback only (was 2s)
 
 const processing = new Set<string>();
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let wsSubscriptionId: number | null = null;
+let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function clearProcessing(): void {
   processing.clear();
 }
+
+// ── WebSocket Monitor (P2 FIX) ──────────────────────
+
+export function startWebSocketMonitor(connection: Connection): void {
+  stopWebSocketMonitor();
+
+  const config = getConfig();
+  const sourceWallet = config.SOURCE_WALLET;
+  const walletPubkey = new PublicKey(sourceWallet);
+
+  logger.info({ sourceWallet }, 'WebSocket monitor starting (onLogs)');
+
+  try {
+    wsSubscriptionId = connection.onLogs(
+      walletPubkey,
+      async (logs: Logs) => {
+        const sig = logs.signature;
+        if (logs.err) return;
+        if (isEventProcessed(sig)) return;
+        if (processing.has(sig)) return;
+        processing.add(sig);
+
+        try {
+          const parsed = await parseSwapFromRpc(connection, sig, sourceWallet);
+          if (parsed) {
+            parsed._source = 'ws';
+            if (parsed.direction === 'BUY') registerPendingBuy(parsed.tokenMint);
+            logger.info(
+              { source: 'ws', direction: parsed.direction, token: parsed.tokenMint, sol: parsed.solAmount, sig },
+              'WebSocket: swap detected',
+            );
+            await handleParsedSwap(parsed);
+          }
+        } catch (err) {
+          logger.error({ err, sig }, 'WebSocket: error processing tx');
+        } finally {
+          processing.delete(sig);
+        }
+      },
+      'confirmed',
+    );
+
+    logger.info({ subscriptionId: wsSubscriptionId }, 'WebSocket monitor connected');
+
+    // Monitor WebSocket health — auto-reconnect on disconnect
+    scheduleWsHealthCheck(connection);
+  } catch (err) {
+    logger.error({ err }, 'WebSocket monitor failed to start');
+    // Will rely on polling fallback
+  }
+}
+
+export function stopWebSocketMonitor(): void {
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+  if (wsSubscriptionId !== null) {
+    // Fire and forget — we may not have a connection anymore
+    try {
+      const connection = require('../trade/solana').getSharedConnection() as Connection;
+      connection.removeOnLogsListener(wsSubscriptionId).catch(() => {});
+    } catch { /* ignore */ }
+    wsSubscriptionId = null;
+    logger.info('WebSocket monitor stopped');
+  }
+}
+
+function scheduleWsHealthCheck(connection: Connection): void {
+  wsReconnectTimer = setTimeout(async () => {
+    try {
+      // Simple health check: try to get slot
+      await connection.getSlot();
+      // Reschedule
+      scheduleWsHealthCheck(connection);
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, 'WebSocket health check failed, reconnecting...');
+      startWebSocketMonitor(connection);
+    }
+  }, 30_000); // Check every 30s
+}
+
+// ── Polling Monitor (fallback) ──────────────────────
 
 export function stopPollingMonitor(): void {
   if (pollTimer) {
@@ -29,7 +114,7 @@ export function startPollingMonitor(connection: Connection): void {
   const sourceWallet = config.SOURCE_WALLET;
   const walletPubkey = new PublicKey(sourceWallet);
 
-  logger.info({ sourceWallet, intervalMs: POLL_INTERVAL_MS }, 'Polling monitor started');
+  logger.info({ sourceWallet, intervalMs: POLL_INTERVAL_MS }, 'Polling monitor started (fallback, 5s)');
 
   async function poll() {
     try {
@@ -44,6 +129,8 @@ export function startPollingMonitor(connection: Connection): void {
         parseSwapFromRpc(connection, sigInfo.signature, sourceWallet)
           .then(async (parsed) => {
             if (parsed) {
+              parsed._source = 'poll';
+              if (parsed.direction === 'BUY') registerPendingBuy(parsed.tokenMint);
               logger.info(
                 { source: 'poll', direction: parsed.direction, token: parsed.tokenMint, sol: parsed.solAmount, sig: parsed.signature },
                 'Poll: swap detected',
@@ -67,6 +154,8 @@ export function startPollingMonitor(connection: Connection): void {
   poll();
 }
 
+// ── RPC Swap Parser ─────────────────────────────────
+
 export async function parseSwapFromRpc(
   connection: Connection,
   signature: string,
@@ -89,10 +178,6 @@ export async function parseSwapFromRpc(
   const netSolLamports = tx.meta.postBalances[walletIdx] - tx.meta.preBalances[walletIdx];
   if (netSolLamports === 0) return null;
 
-  // Filter out token-to-token swaps where SOL change is just network fees.
-  // Safe for real BUY/SELL because Jupiter wrapAndUnwrapSol=true ensures
-  // the full swap amount flows through the SOL balance (MIN_SOL_PER_TRADE
-  // = 0.001 SOL = 1,000,000 lamports >> this threshold).
   const MIN_SOL_CHANGE_LAMPORTS = 50_000; // 0.00005 SOL
   if (Math.abs(netSolLamports) < MIN_SOL_CHANGE_LAMPORTS) return null;
 

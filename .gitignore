@@ -5,3 +5,4 @@ logs/
 reports/
 .env
 *.log
+.claude/

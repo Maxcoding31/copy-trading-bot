@@ -54,6 +54,45 @@ const configSchema = z.object({
   // Slippage alert threshold (LIVE mode compareExecution)
   COMPARE_ALERT_PCT: z.coerce.number().gte(0).default(3),
 
+  // Extra RPC endpoints for multi-send and fallback (comma-separated URLs)
+  EXTRA_RPC_URLS: z.string().default(''),
+
+  // Jupiter: use dynamic slippage (Jupiter auto-adjusts)
+  USE_DYNAMIC_SLIPPAGE: boolStr.default('false'),
+
+  // Jupiter: restrict intermediate tokens (prevents "no route" on micro-caps; default OFF)
+  RESTRICT_INTERMEDIATE_TOKENS: boolStr.default('false'),
+
+  // Price Drift Guard: max allowed price increase (0–1, e.g. 0.2 = 20%) between source price and bot quote price
+  // Set to 0 to disable.
+  MAX_PRICE_DRIFT_PCT: z.coerce.number().gte(0).default(0.2),
+
+  // Priority fee: use dynamic fee based on recent network fees
+  USE_DYNAMIC_PRIORITY_FEE: boolStr.default('false'),
+
+  // Position state machine: timeout for SENT positions (minutes)
+  PENDING_POSITION_TIMEOUT_MINUTES: z.coerce.number().int().gte(1).default(5),
+
+  // Circuit breaker thresholds
+  CB_FAIL_RATE_PCT: z.coerce.number().gte(0).lte(100).default(30),
+  CB_FAIL_WINDOW_MINUTES: z.coerce.number().int().gte(1).default(10),
+  CB_LATENCY_P99_MS: z.coerce.number().int().gte(0).default(15000),
+  CB_NO_POSITION_SPIKE: z.coerce.number().int().gte(0).default(5),
+  // Auto-reset circuit breaker after N minutes (0 = manual only)
+  CB_AUTO_RESET_MINUTES: z.coerce.number().int().gte(0).default(15),
+
+  // _unsafe_parse: trades parsed via nativeTransfers fallback (decimals approximated to 6)
+  // false = reject these trades entirely; true = allow (default)
+  ALLOW_UNSAFE_PARSE_TRADES: boolStr.default('true'),
+  // Skip Price Drift Guard for unsafe-parsed trades (approximated decimals make drift unreliable)
+  DISABLE_DRIFT_GUARD_ON_UNSAFE_PARSE: boolStr.default('true'),
+
+  // SELL on SENT (unconfirmed) position behavior
+  // false = buffer up to SELL_ON_SENT_TIMEOUT_SECONDS waiting for CONFIRMED, then reject
+  ALLOW_SELL_ON_SENT_POSITION: boolStr.default('false'),
+  // Max seconds to wait for SENT→CONFIRMED before rejecting SELL (0 = reject immediately)
+  SELL_ON_SENT_TIMEOUT_SECONDS: z.coerce.number().int().gte(0).default(10),
+
   // Kill switches
   PAUSE_TRADING: boolStr,
   DRY_RUN: boolStr,

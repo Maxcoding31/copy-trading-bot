@@ -1,4 +1,5 @@
-import { getPosition, upsertPosition, deletePosition } from '../db/repo';
+import { getPosition, upsertPosition, setPendingPosition, deletePosition } from '../db/repo';
+import { getConfig } from '../config';
 import { logger } from '../utils/logger';
 import type { TradePlan } from '../risk/engine';
 
@@ -18,16 +19,26 @@ export function updatePosition(plan: TradePlan, quoteOutAmount: string): void {
 function handleBuy(plan: TradePlan, quoteOutAmount: string): void {
   const { mint, tokenDecimals } = plan;
   const tokensReceived = BigInt(quoteOutAmount);
+  const config = getConfig();
 
-  const current = getPosition(mint);
-  const existing = current ? BigInt(current.amount_raw) : 0n;
-  const newTotal = existing + tokensReceived;
-
-  upsertPosition(mint, newTotal, tokenDecimals);
-  logger.info(
-    { mint, received: tokensReceived.toString(), total: newTotal.toString(), decimals: tokenDecimals },
-    'Position increased after BUY',
-  );
+  if (config.DRY_RUN) {
+    // DRY_RUN: no async confirmation, create position as CONFIRMED immediately
+    const current = getPosition(mint);
+    const existing = current ? BigInt(current.amount_raw) : 0n;
+    const newTotal = existing + tokensReceived;
+    upsertPosition(mint, newTotal, tokenDecimals);
+    logger.info(
+      { mint, received: tokensReceived.toString(), total: newTotal.toString(), decimals: tokenDecimals },
+      'Position increased after BUY (DRY_RUN, CONFIRMED)',
+    );
+  } else {
+    // LIVE: mark as SENT — will be promoted to CONFIRMED by confirmAndRecordAsync
+    setPendingPosition(mint, tokensReceived, tokenDecimals);
+    logger.info(
+      { mint, received: tokensReceived.toString(), decimals: tokenDecimals },
+      'Position created as SENT (LIVE — awaiting on-chain confirmation)',
+    );
+  }
 }
 
 function handleSell(plan: TradePlan): void {

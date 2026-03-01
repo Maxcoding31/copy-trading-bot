@@ -6,16 +6,20 @@ import { loadConfig, getConfig, reloadConfig } from './config';
 import { initDb, closeDb, resetDb } from './db/sqlite';
 import { getKeypair, reloadKeypair, getSharedConnection } from './trade/solana';
 import { webhookRouter } from './webhook/handler';
-import { startPollingMonitor, stopPollingMonitor, clearProcessing } from './monitor/wsMonitor';
+import { startPollingMonitor, stopPollingMonitor, startWebSocketMonitor, stopWebSocketMonitor, clearProcessing } from './monitor/wsMonitor';
 import { notifyStartup, notifyError } from './notify/telegram';
 import {
   getVirtualPnL, getVirtualPortfolio, getDailySpent, getOpenPositionCount,
   getRecentSourceTrades, getRecentVirtualTrades,
   recordPnlSnapshot, getPnlHistory, getDailySummary, getDailyComparisonMetrics,
+  getPipelineMetricsSummary,
   markEventProcessed,
   initVirtualWallet, getVirtualCash, setVirtualCash,
   cleanupOldEvents, cleanupOldSnapshots,
+  getStalePendingPositions, failPosition,
 } from './db/repo';
+import { getCircuitState, resetCircuit } from './guard/circuitBreaker';
+import { buildPerformanceReport } from './report/html';
 import { logger } from './utils/logger';
 
 async function main(): Promise<void> {
@@ -154,9 +158,62 @@ async function main(): Promise<void> {
       pnlHistory: getPnlHistory(24),
       dailySummary: getDailySummary(),
       comparisonMetrics: getDailyComparisonMetrics(),
+      pipelineMetrics: getPipelineMetricsSummary(),
+      circuitBreaker: getCircuitState(),
       uptime: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // ── B: Performance Report (HTML) ─────────────────
+  app.get('/report/:day', (_req, res) => {
+    const raw = _req.params.day;
+    const day = raw === 'today' ? new Date().toISOString().slice(0, 10) : raw;
+    const html = buildPerformanceReport(day);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  });
+
+  // ── B: JSON export (raw data) ─────────────────────
+  app.get('/api/report/export/json/:day', (_req, res) => {
+    const raw = _req.params.day;
+    const day = raw === 'today' ? new Date().toISOString().slice(0, 10) : raw;
+    const cfg = getConfig();
+    const summary = getDailySummary(day);
+    const comparison = getDailyComparisonMetrics(day);
+    const pipelineMetrics = getPipelineMetricsSummary(day);
+    const circuitBreaker = getCircuitState();
+    const pnl = getVirtualPnL();
+    const cash = getVirtualCash();
+
+    const data = {
+      generatedAt: new Date().toISOString(),
+      day,
+      mode: cfg.DRY_RUN ? 'SIMULATION' : 'LIVE',
+      pipelineMetrics,
+      dailySummary: summary,
+      comparisonMetrics: comparison,
+      circuitBreaker,
+      wallet: {
+        startingBalance: cfg.VIRTUAL_STARTING_BALANCE,
+        currentBalance: +(cfg.VIRTUAL_STARTING_BALANCE + pnl.pnl).toFixed(6),
+        virtualCash: +cash.toFixed(6),
+        pnl: +pnl.pnl.toFixed(6),
+      },
+    };
+
+    res.setHeader('Content-Disposition', `attachment; filename="bot-report-${day}.json"`);
+    res.json(data);
+  });
+
+  // ── A4: Circuit breaker API ───────────────────────
+  app.post('/api/circuit-breaker/reset', (_req, res) => {
+    resetCircuit('manual API reset');
+    res.json({ ok: true, state: getCircuitState() });
+  });
+
+  app.get('/api/circuit-breaker', (_req, res) => {
+    res.json(getCircuitState());
   });
 
   // ── Daily Report API ─────────────────────────────
@@ -198,6 +255,7 @@ async function main(): Promise<void> {
       },
       dailySummary: summary,
       comparisonMetrics: comparison,
+      pipelineMetrics: getPipelineMetricsSummary(day),
       positions: portfolio.map((p) => ({
         mint: p.mint,
         tokens: p.token_amount,
@@ -255,6 +313,7 @@ async function main(): Promise<void> {
       if (botChanged) reloadKeypair();
 
       if (resetHistory) {
+        stopWebSocketMonitor();
         stopPollingMonitor();
         clearProcessing();
         resetDb();
@@ -272,8 +331,9 @@ async function main(): Promise<void> {
           logger.warn({ err: e }, 'Failed to pre-populate processed_events');
         }
 
+        startWebSocketMonitor(conn);
         startPollingMonitor(conn);
-        logger.info('History reset complete, polling monitor restarted');
+        logger.info('History reset complete, monitors restarted');
       } else if (balanceChanged) {
         const delta = Number(newBalance) - oldConfig.VIRTUAL_STARTING_BALANCE;
         const currentCash = getVirtualCash();
@@ -309,10 +369,13 @@ async function main(): Promise<void> {
           throw new Error(`Webhook registration failed: ${whRes.status} – ${body}`);
         }
 
+        stopWebSocketMonitor();
         stopPollingMonitor();
         clearProcessing();
-        startPollingMonitor(getSharedConnection());
-        logger.info({ sourceWallet: newConfig.SOURCE_WALLET }, 'Source wallet changed, webhook + polling restarted');
+        const conn2 = getSharedConnection();
+        startWebSocketMonitor(conn2);
+        startPollingMonitor(conn2);
+        logger.info({ sourceWallet: newConfig.SOURCE_WALLET }, 'Source wallet changed, webhook + monitors restarted');
       }
 
       const kp = botChanged ? reloadKeypair() : getKeypair();
@@ -369,9 +432,10 @@ async function main(): Promise<void> {
 
     try {
       const connection = getSharedConnection();
+      startWebSocketMonitor(connection);
       startPollingMonitor(connection);
     } catch (err) {
-      logger.error({ err }, 'Failed to start polling monitor, relying on webhook only');
+      logger.error({ err }, 'Failed to start monitors, relying on webhook only');
     }
   });
 
@@ -383,6 +447,25 @@ async function main(): Promise<void> {
       recordPnlSnapshot(cash, pnl.pnl);
     } catch { /* non-critical */ }
   }, 60_000);
+
+  // A1: Timeout stale SENT positions every 2 minutes
+  setInterval(() => {
+    try {
+      const cfg = getConfig();
+      const stale = getStalePendingPositions(cfg.PENDING_POSITION_TIMEOUT_MINUTES);
+      for (const pos of stale) {
+        logger.error(
+          { mint: pos.mint, amount: pos.amount_raw, since: pos.updated_at },
+          `A1: Position stuck as SENT for >${cfg.PENDING_POSITION_TIMEOUT_MINUTES}min — marking FAILED`,
+        );
+        failPosition(pos.mint, BigInt(pos.amount_raw));
+      }
+      if (stale.length > 0) {
+        const { notifyError: ne } = require('./notify/telegram');
+        ne(`⚠️ ${stale.length} position(s) SENT expirées nettoyées: ${stale.map((p) => p.mint.slice(0, 8)).join(', ')}`);
+      }
+    } catch { /* non-critical */ }
+  }, 2 * 60_000);
 
   // DB cleanup every 6 hours
   setInterval(() => {

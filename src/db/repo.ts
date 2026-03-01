@@ -21,6 +21,7 @@ export interface PositionRow {
   mint: string;
   amount_raw: string;
   decimals: number;
+  status: 'CONFIRMED' | 'SENT';
   updated_at: string;
 }
 
@@ -42,14 +43,82 @@ export function getOpenPositionCount(): number {
 export function upsertPosition(mint: string, amountRaw: bigint, decimals: number): void {
   getDb()
     .prepare(
-      `INSERT INTO positions (mint, amount_raw, decimals, updated_at)
-       VALUES (?, ?, ?, datetime('now'))
+      `INSERT INTO positions (mint, amount_raw, decimals, updated_at, status)
+       VALUES (?, ?, ?, datetime('now'), 'CONFIRMED')
        ON CONFLICT(mint) DO UPDATE SET
          amount_raw = excluded.amount_raw,
          decimals   = excluded.decimals,
-         updated_at = excluded.updated_at`,
+         updated_at = excluded.updated_at,
+         status     = excluded.status`,
     )
     .run(mint, amountRaw.toString(), decimals);
+}
+
+/**
+ * A1: Create/increase a position with status='SENT' (tx broadcast, not yet confirmed).
+ * Used in LIVE mode immediately after transaction is sent.
+ */
+export function setPendingPosition(mint: string, addAmountRaw: bigint, decimals: number): void {
+  const existing = getDb()
+    .prepare('SELECT amount_raw FROM positions WHERE mint = ?')
+    .get(mint) as { amount_raw: string } | undefined;
+
+  const existingAmt = existing ? BigInt(existing.amount_raw) : 0n;
+  const newTotal = existingAmt + addAmountRaw;
+
+  getDb()
+    .prepare(
+      `INSERT INTO positions (mint, amount_raw, decimals, updated_at, status)
+       VALUES (?, ?, ?, datetime('now'), 'SENT')
+       ON CONFLICT(mint) DO UPDATE SET
+         amount_raw = ?,
+         decimals   = excluded.decimals,
+         updated_at = excluded.updated_at,
+         status     = 'SENT'`,
+    )
+    .run(mint, newTotal.toString(), decimals, newTotal.toString());
+}
+
+/**
+ * A1: Mark a position as CONFIRMED after on-chain confirmation.
+ */
+export function confirmPosition(mint: string): void {
+  getDb()
+    .prepare(`UPDATE positions SET status = 'CONFIRMED', updated_at = datetime('now') WHERE mint = ?`)
+    .run(mint);
+}
+
+/**
+ * A1: Rollback a SENT position by removing the pending amount.
+ * If the resulting amount is zero, delete the position entirely.
+ */
+export function failPosition(mint: string, pendingAmountRaw: bigint): void {
+  const existing = getDb()
+    .prepare('SELECT amount_raw FROM positions WHERE mint = ?')
+    .get(mint) as { amount_raw: string } | undefined;
+
+  if (!existing) return;
+
+  const remaining = BigInt(existing.amount_raw) - pendingAmountRaw;
+  if (remaining <= 0n) {
+    getDb().prepare('DELETE FROM positions WHERE mint = ?').run(mint);
+  } else {
+    getDb()
+      .prepare(`UPDATE positions SET amount_raw = ?, status = 'CONFIRMED', updated_at = datetime('now') WHERE mint = ?`)
+      .run(remaining.toString(), mint);
+  }
+}
+
+/**
+ * A1: Find positions stuck as SENT beyond the timeout (minutes).
+ */
+export function getStalePendingPositions(timeoutMinutes: number): PositionRow[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM positions WHERE status = 'SENT'
+       AND updated_at < datetime('now', ?)`,
+    )
+    .all(`-${timeoutMinutes} minutes`) as PositionRow[];
 }
 
 export function deletePosition(mint: string): void {
@@ -356,6 +425,214 @@ export function getDailyComparisonMetrics(day?: string) {
     avgTokenSlippagePct: +(absToken.reduce((s, v) => s + v, 0) / absToken.length).toFixed(3),
     p95TokenSlippagePct: +absToken[p95Idx].toFixed(3),
     maxTokenSlippagePct: +absToken[absToken.length - 1].toFixed(3),
+  };
+}
+
+// ── Trade Pipeline Metrics (Instrumentation) ──────
+
+export interface PipelineMetric {
+  signature: string;
+  direction: string;
+  mint: string;
+  source: string;
+  outcome: string;
+  reject_reason?: string;
+  sell_buffered: boolean;
+  sell_buffer_ms: number;
+  latency_risk_ms: number;
+  latency_exec_ms: number;
+  latency_total_ms: number;
+  /** Price drift % observed for BUY trades: (quote_price/source_price - 1) * 100 */
+  price_drift_pct?: number;
+  /** Whether this trade was parsed via the low-confidence nativeTransfers fallback */
+  unsafe_parse?: boolean;
+  /** Milliseconds waited for SENT→CONFIRMED before processing a SELL */
+  sell_on_sent_ms?: number;
+}
+
+export function recordPipelineMetric(m: PipelineMetric): void {
+  getDb()
+    .prepare(
+      `INSERT INTO trade_pipeline_metrics
+       (signature, direction, mint, source, outcome, reject_reason,
+        sell_buffered, sell_buffer_ms, latency_risk_ms, latency_exec_ms, latency_total_ms,
+        price_drift_pct, unsafe_parse, sell_on_sent_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      m.signature, m.direction, m.mint, m.source, m.outcome,
+      m.reject_reason ?? null,
+      m.sell_buffered ? 1 : 0, m.sell_buffer_ms,
+      m.latency_risk_ms, m.latency_exec_ms, m.latency_total_ms,
+      m.price_drift_pct ?? null,
+      m.unsafe_parse ? 1 : 0,
+      m.sell_on_sent_ms ?? 0,
+    );
+}
+
+export function getUnsafeParseStats(day?: string) {
+  const d = day ?? new Date().toISOString().slice(0, 10);
+
+  const total = getDb()
+    .prepare('SELECT COUNT(*) as cnt FROM trade_pipeline_metrics WHERE DATE(created_at) = ?')
+    .get(d) as { cnt: number };
+
+  const unsafeTotal = getDb()
+    .prepare('SELECT COUNT(*) as cnt FROM trade_pipeline_metrics WHERE DATE(created_at) = ? AND unsafe_parse = 1')
+    .get(d) as { cnt: number };
+
+  const unsafeRejected = getDb()
+    .prepare(`SELECT COUNT(*) as cnt FROM trade_pipeline_metrics WHERE DATE(created_at) = ? AND unsafe_parse = 1 AND reject_reason = 'UNSAFE_PARSE'`)
+    .get(d) as { cnt: number };
+
+  const unsafeCopied = getDb()
+    .prepare(`SELECT COUNT(*) as cnt FROM trade_pipeline_metrics WHERE DATE(created_at) = ? AND unsafe_parse = 1 AND outcome = 'COPIED'`)
+    .get(d) as { cnt: number };
+
+  return {
+    total: total.cnt,
+    unsafeTotal: unsafeTotal.cnt,
+    unsafePct: total.cnt > 0 ? +((unsafeTotal.cnt / total.cnt) * 100).toFixed(1) : 0,
+    unsafeRejected: unsafeRejected.cnt,
+    unsafeCopied: unsafeCopied.cnt,
+  };
+}
+
+export function getUnroutableStats(day?: string) {
+  const d = day ?? new Date().toISOString().slice(0, 10);
+
+  const total = getDb()
+    .prepare('SELECT COUNT(*) as cnt FROM trade_pipeline_metrics WHERE DATE(created_at) = ?')
+    .get(d) as { cnt: number };
+
+  const unroutable = getDb()
+    .prepare(`SELECT COUNT(*) as cnt FROM trade_pipeline_metrics WHERE DATE(created_at) = ? AND reject_reason = 'UNROUTABLE_TOKEN'`)
+    .get(d) as { cnt: number };
+
+  const topMints = getDb()
+    .prepare(
+      `SELECT mint, COUNT(*) as cnt FROM trade_pipeline_metrics
+       WHERE DATE(created_at) = ? AND reject_reason = 'UNROUTABLE_TOKEN'
+       GROUP BY mint ORDER BY cnt DESC LIMIT 10`,
+    )
+    .all(d) as Array<{ mint: string; cnt: number }>;
+
+  return {
+    count: unroutable.cnt,
+    totalTrades: total.cnt,
+    pct: total.cnt > 0 ? +((unroutable.cnt / total.cnt) * 100).toFixed(1) : 0,
+    topMints,
+  };
+}
+
+export function getSellOnSentStats(day?: string) {
+  const d = day ?? new Date().toISOString().slice(0, 10);
+
+  const notConfirmed = getDb()
+    .prepare(`SELECT COUNT(*) as cnt FROM trade_pipeline_metrics WHERE DATE(created_at) = ? AND reject_reason = 'POSITION_NOT_CONFIRMED'`)
+    .get(d) as { cnt: number };
+
+  const waitRows = getDb()
+    .prepare(
+      `SELECT sell_on_sent_ms FROM trade_pipeline_metrics
+       WHERE DATE(created_at) = ? AND sell_on_sent_ms > 0`,
+    )
+    .all(d) as Array<{ sell_on_sent_ms: number }>;
+
+  const avgWaitMs = waitRows.length > 0
+    ? Math.round(waitRows.reduce((s, r) => s + r.sell_on_sent_ms, 0) / waitRows.length)
+    : 0;
+
+  return {
+    notConfirmedCount: notConfirmed.cnt,
+    sellsOnSent: waitRows.length,
+    avgWaitMs,
+  };
+}
+
+export function getPriceDriftStats(day?: string) {
+  const d = day ?? new Date().toISOString().slice(0, 10);
+
+  const rejected = getDb()
+    .prepare(
+      `SELECT COUNT(*) as cnt FROM trade_pipeline_metrics
+       WHERE DATE(created_at) = ? AND reject_reason = 'PRICE_DRIFT_TOO_HIGH'`,
+    )
+    .get(d) as { cnt: number };
+
+  const drifts = getDb()
+    .prepare(
+      `SELECT price_drift_pct FROM trade_pipeline_metrics
+       WHERE DATE(created_at) = ? AND direction = 'BUY' AND price_drift_pct IS NOT NULL
+       ORDER BY price_drift_pct ASC`,
+    )
+    .all(d) as Array<{ price_drift_pct: number }>;
+
+  if (drifts.length === 0) {
+    return { rejectedCount: rejected.cnt, count: 0, min: null, median: null, p90: null, max: null };
+  }
+
+  const vals = drifts.map((r) => r.price_drift_pct);
+  return {
+    rejectedCount: rejected.cnt,
+    count: vals.length,
+    min: +vals[0].toFixed(2),
+    median: +vals[Math.floor(vals.length * 0.5)].toFixed(2),
+    p90: +vals[Math.min(Math.floor(vals.length * 0.9), vals.length - 1)].toFixed(2),
+    max: +vals[vals.length - 1].toFixed(2),
+  };
+}
+
+export function getPipelineMetricsSummary(day?: string) {
+  const d = day ?? new Date().toISOString().slice(0, 10);
+
+  const total = getDb()
+    .prepare('SELECT COUNT(*) as cnt FROM trade_pipeline_metrics WHERE DATE(created_at) = ?')
+    .get(d) as { cnt: number };
+
+  const byOutcome = getDb()
+    .prepare(
+      `SELECT outcome, COUNT(*) as cnt FROM trade_pipeline_metrics
+       WHERE DATE(created_at) = ? GROUP BY outcome`,
+    )
+    .all(d) as Array<{ outcome: string; cnt: number }>;
+
+  const sellBuffered = getDb()
+    .prepare(
+      `SELECT COUNT(*) as cnt, AVG(sell_buffer_ms) as avg_ms
+       FROM trade_pipeline_metrics WHERE DATE(created_at) = ? AND sell_buffered = 1`,
+    )
+    .get(d) as { cnt: number; avg_ms: number | null };
+
+  const latencies = getDb()
+    .prepare(
+      `SELECT latency_total_ms FROM trade_pipeline_metrics
+       WHERE DATE(created_at) = ? AND outcome = 'COPIED' ORDER BY latency_total_ms ASC`,
+    )
+    .all(d) as Array<{ latency_total_ms: number }>;
+
+  let p50 = 0, p90 = 0, p99 = 0;
+  if (latencies.length > 0) {
+    const vals = latencies.map((r) => r.latency_total_ms);
+    p50 = vals[Math.floor(vals.length * 0.5)];
+    p90 = vals[Math.floor(vals.length * 0.9)];
+    p99 = vals[Math.min(Math.floor(vals.length * 0.99), vals.length - 1)];
+  }
+
+  const rejectReasons = getDb()
+    .prepare(
+      `SELECT reject_reason, COUNT(*) as cnt FROM trade_pipeline_metrics
+       WHERE DATE(created_at) = ? AND outcome = 'REJECTED' GROUP BY reject_reason ORDER BY cnt DESC`,
+    )
+    .all(d) as Array<{ reject_reason: string; cnt: number }>;
+
+  return {
+    day: d,
+    total: total.cnt,
+    byOutcome: Object.fromEntries(byOutcome.map((r) => [r.outcome, r.cnt])),
+    sellBuffered: { count: sellBuffered.cnt, avgMs: Math.round(sellBuffered.avg_ms ?? 0) },
+    latency: { p50, p90, p99, count: latencies.length },
+    rejectReasons,
   };
 }
 
